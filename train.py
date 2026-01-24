@@ -21,7 +21,7 @@ from tqdm import tqdm
 
 from config import Config, get_default_config
 from src.data.dataset import load_deepfake_dataset
-from src.data.transforms import preprocess_function, collate_fn, get_gpu_transform
+from src.data.transforms import collate_fn, get_gpu_transform
 from src.models.discriminator import DCTDiscriminator
 from src.models.generator import UNetGenerator
 from src.training.trainer import DeepfakeGANTrainer
@@ -167,15 +167,10 @@ def main() -> None:
         cache_dir=config.dataset.cache_dir
     )
     
-    # Apply preprocessing transforms
-    print("Preprocessing dataset...")
-    dataset = dataset.map(
-        preprocess_function,
-        batched=True,
-        batch_size=100,
-        num_proc=config.dataset.num_workers
-    )
-    dataset.set_format(type='torch', columns=['image', 'label'])
+    # Set format to keep PIL images - transforms applied on-the-fly in collate_fn
+    # This avoids caching transformed tensors to disk (which causes 90GB+ storage)
+    print("Setting up dataset (transforms applied on-the-fly)...")
+    dataset.set_format(columns=['image', 'label'])
     
     # Create dataloaders
     train_loader = DataLoader(

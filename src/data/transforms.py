@@ -53,6 +53,7 @@ def collate_fn(batch: List[Dict[str, Any]]) -> tuple:
     """Custom collate function for DataLoader.
     
     Stacks images into a batch tensor and extracts labels.
+    Applies CPU transforms on-the-fly to avoid caching transformed data.
     
     Args:
         batch: List of dictionaries, each containing 'image' and 'label'.
@@ -60,6 +61,7 @@ def collate_fn(batch: List[Dict[str, Any]]) -> tuple:
     Returns:
         Tuple of (images, labels) tensors.
     """
-    images = torch.stack([item['image'] for item in batch])
+    # Apply transforms on-the-fly (no caching = no disk bloat)
+    images = torch.stack([cpu_transform(item['image']) for item in batch])
     labels = torch.tensor([item['label'] for item in batch], dtype=torch.float32)
     return images, labels

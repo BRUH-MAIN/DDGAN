@@ -21,7 +21,7 @@ from tqdm import tqdm
 
 from config import get_default_config
 from src.data.dataset import load_deepfake_dataset
-from src.data.transforms import preprocess_function, collate_fn, get_gpu_transform
+from src.data.transforms import collate_fn, get_gpu_transform
 from src.models.discriminator import DCTDiscriminator
 from src.utils.metrics import (
     compute_accuracy, 
@@ -234,15 +234,10 @@ def main() -> None:
         print(f"Warning: 'test' split not found, using 'val' instead")
         split = 'val'
     
-    # Apply preprocessing
-    print("Preprocessing dataset...")
-    eval_dataset = dataset[split].map(
-        preprocess_function,
-        batched=True,
-        batch_size=100,
-        num_proc=args.num_workers
-    )
-    eval_dataset.set_format(type='torch', columns=['image', 'label'])
+    # Set up dataset - transforms applied on-the-fly in collate_fn
+    print("Setting up dataset (transforms applied on-the-fly)...")
+    eval_dataset = dataset[split]
+    eval_dataset.set_format(columns=['image', 'label'])
     
     # Create dataloader
     eval_loader = DataLoader(
