@@ -28,6 +28,8 @@ from src.data.transforms import collate_fn, get_gpu_transform
 from src.training.trainer import DeepfakeGANModule
 
 
+from datasets import concatenate_datasets
+
 class GPUTransformDataModule(L.LightningDataModule):
     """Lightning DataModule that applies GPU transforms.
     
@@ -40,14 +42,19 @@ class GPUTransformDataModule(L.LightningDataModule):
         batch_size: int = 32,
         num_workers: int = 4,
         cache_dir: str = None,
+        val_to_train_ratio: float = 0.0,
+        test_to_train_ratio: float = 0.0,
     ):
         super().__init__()
         self.dataset_name = dataset_name
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.cache_dir = cache_dir
+        self.val_to_train_ratio = val_to_train_ratio
+        self.test_to_train_ratio = test_to_train_ratio
         self.gpu_transform = None
-        self.dataset = None
+        self.train_dataset = None
+        self.val_dataset = None
     
     def prepare_data(self):
         """Download data if needed."""
@@ -56,18 +63,57 @@ class GPUTransformDataModule(L.LightningDataModule):
     
     def setup(self, stage: str = None):
         """Set up datasets for each stage."""
-        self.dataset = load_deepfake_dataset(
+        dataset = load_deepfake_dataset(
             self.dataset_name, 
             cache_dir=self.cache_dir
         )
-        self.dataset.set_format(columns=['image', 'label'])
+        
+        train_data = dataset['train']
+        val_data = dataset['val']
+        test_data = dataset.get('test', None)
+        
+        datasets_to_concat = [train_data]
+        
+        # Move portion of validation to training
+        if self.val_to_train_ratio > 0:
+            n_val_to_move = int(len(val_data) * self.val_to_train_ratio)
+            if n_val_to_move > 0:
+                val_data = val_data.shuffle(seed=42)
+                val_to_train = val_data.select(range(n_val_to_move))
+                val_data = val_data.select(range(n_val_to_move, len(val_data)))
+                datasets_to_concat.append(val_to_train)
+                print(f"Moving {n_val_to_move} samples from val to train")
+        
+        # Move portion of test to training
+        if self.test_to_train_ratio > 0 and test_data is not None:
+            n_test_to_move = int(len(test_data) * self.test_to_train_ratio)
+            if n_test_to_move > 0:
+                test_data = test_data.shuffle(seed=42)
+                test_to_train = test_data.select(range(n_test_to_move))
+                datasets_to_concat.append(test_to_train)
+                print(f"Moving {n_test_to_move} samples from test to train")
+        
+        # Concatenate all training data
+        if len(datasets_to_concat) > 1:
+            self.train_dataset = concatenate_datasets(datasets_to_concat)
+        else:
+            self.train_dataset = train_data
+        
+        self.val_dataset = val_data
+        
+        # Set format
+        self.train_dataset.set_format(columns=['image', 'label'])
+        self.val_dataset.set_format(columns=['image', 'label'])
+        
+        print(f"Final train size: {len(self.train_dataset)}")
+        print(f"Final val size: {len(self.val_dataset)}")
         
         # Create GPU transform
         self.gpu_transform = get_gpu_transform()
     
     def train_dataloader(self):
         return DataLoader(
-            self.dataset['train'],
+            self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
@@ -79,7 +125,7 @@ class GPUTransformDataModule(L.LightningDataModule):
     
     def val_dataloader(self):
         return DataLoader(
-            self.dataset['val'],
+            self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
@@ -137,6 +183,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log_dir", type=str, default="logs",
                        help="Directory for logs")
     
+    # Data split arguments
+    parser.add_argument("--val_to_train", type=float, default=0.0,
+                       help="Fraction of validation data to move to training (0.0-1.0)")
+    parser.add_argument("--test_to_train", type=float, default=0.0,
+                       help="Fraction of test data to move to training (0.0-1.0)")
+    
     # Other arguments
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed")
@@ -184,6 +236,8 @@ def main() -> None:
         batch_size=config.training.batch_size,
         num_workers=config.dataset.num_workers,
         cache_dir=config.dataset.cache_dir,
+        val_to_train_ratio=args.val_to_train,
+        test_to_train_ratio=args.test_to_train,
     )
     
     # Create model
