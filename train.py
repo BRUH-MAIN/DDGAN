@@ -1,7 +1,7 @@
-"""Training script for Deepfake Detection GAN.
+"""Training script for Deepfake Detection GAN using PyTorch Lightning.
 
 This script handles the complete training pipeline including data loading,
-model initialization, training loop, validation, and checkpointing.
+model initialization, and training with automatic checkpointing and logging.
 
 Usage:
     python train.py --dataset_name "your-dataset/name" --epochs 50
@@ -10,45 +10,98 @@ Usage:
 
 import argparse
 import os
-import random
-from typing import Dict, List
 
-import numpy as np
+import lightning as L
 import torch
-import torch.backends.cudnn as cudnn
+from lightning.pytorch.callbacks import (
+    ModelCheckpoint,
+    LearningRateMonitor,
+    RichProgressBar,
+    EarlyStopping,
+)
+from lightning.pytorch.loggers import CSVLogger
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
-from config import Config, get_default_config
+from config import get_default_config
 from src.data.dataset import load_deepfake_dataset
 from src.data.transforms import collate_fn, get_gpu_transform
-from src.models.discriminator import DCTDiscriminator
-from src.models.generator import UNetGenerator
-from src.training.trainer import DeepfakeGANTrainer
-from src.utils.metrics import MetricsTracker
-from src.utils.visualization import plot_training_curves, visualize_adversarial_examples
+from src.training.trainer import DeepfakeGANModule
 
 
-def set_seed(seed: int) -> None:
-    """Set random seeds for reproducibility.
+class GPUTransformDataModule(L.LightningDataModule):
+    """Lightning DataModule that applies GPU transforms.
     
-    Args:
-        seed: Random seed value.
+    Wraps the dataset and applies GPU transforms during batch transfer.
     """
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+    
+    def __init__(
+        self,
+        dataset_name: str,
+        batch_size: int = 32,
+        num_workers: int = 4,
+        cache_dir: str = None,
+    ):
+        super().__init__()
+        self.dataset_name = dataset_name
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.cache_dir = cache_dir
+        self.gpu_transform = None
+        self.dataset = None
+    
+    def prepare_data(self):
+        """Download data if needed."""
+        # This will download and cache the dataset
+        load_deepfake_dataset(self.dataset_name, cache_dir=self.cache_dir)
+    
+    def setup(self, stage: str = None):
+        """Set up datasets for each stage."""
+        self.dataset = load_deepfake_dataset(
+            self.dataset_name, 
+            cache_dir=self.cache_dir
+        )
+        self.dataset.set_format(columns=['image', 'label'])
+        
+        # Create GPU transform
+        self.gpu_transform = get_gpu_transform()
+    
+    def train_dataloader(self):
+        return DataLoader(
+            self.dataset['train'],
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            persistent_workers=self.num_workers > 0,
+            drop_last=True,
+        )
+    
+    def val_dataloader(self):
+        return DataLoader(
+            self.dataset['val'],
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            persistent_workers=self.num_workers > 0,
+        )
+    
+    def on_after_batch_transfer(self, batch, dataloader_idx):
+        """Apply GPU transforms after batch is transferred to GPU."""
+        images, labels = batch
+        if self.gpu_transform is not None:
+            # Move transform to same device as images
+            if not hasattr(self, '_transform_device') or self._transform_device != images.device:
+                self.gpu_transform = self.gpu_transform.to(images.device)
+                self._transform_device = images.device
+            images = self.gpu_transform(images)
+        return images, labels
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command line arguments.
-    
-    Returns:
-        Parsed arguments namespace.
-    """
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Train Deepfake Detection GAN")
     
     # Dataset arguments
@@ -68,8 +121,9 @@ def parse_args() -> argparse.Namespace:
                        help="Discriminator learning rate")
     parser.add_argument("--g_lr", type=float, default=2e-4,
                        help="Generator learning rate")
-    parser.add_argument("--no_amp", action="store_true",
-                       help="Disable automatic mixed precision")
+    parser.add_argument("--precision", type=str, default="16-mixed",
+                       choices=["32", "16-mixed", "bf16-mixed"],
+                       help="Training precision")
     
     # Model arguments
     parser.add_argument("--no_pretrained", action="store_true",
@@ -77,29 +131,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epsilon", type=float, default=0.03,
                        help="Perturbation strength")
     
-    # Logging arguments
-    parser.add_argument("--wandb", action="store_true",
-                       help="Enable Weights & Biases logging")
-    parser.add_argument("--wandb_project", type=str, default="deepfake-gan",
-                       help="W&B project name")
-    parser.add_argument("--log_interval", type=int, default=10,
-                       help="Log every N batches")
-    parser.add_argument("--save_interval", type=int, default=5,
-                       help="Save checkpoint every N epochs")
-    parser.add_argument("--val_interval", type=int, default=1,
-                       help="Validate every N epochs")
-    
     # Path arguments
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints",
                        help="Directory for checkpoints")
-    parser.add_argument("--output_dir", type=str, default="outputs",
-                       help="Directory for outputs")
+    parser.add_argument("--log_dir", type=str, default="logs",
+                       help="Directory for logs")
     
     # Other arguments
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed")
     parser.add_argument("--resume", type=str, default=None,
                        help="Path to checkpoint to resume from")
+    parser.add_argument("--fast_dev_run", action="store_true",
+                       help="Run a fast development test")
     
     return parser.parse_args()
 
@@ -121,249 +165,114 @@ def main() -> None:
     config.training.epochs = args.epochs
     config.training.d_lr = args.d_lr
     config.training.g_lr = args.g_lr
-    config.training.use_amp = not args.no_amp
+    config.training.precision = args.precision
     
     config.model.pretrained = not args.no_pretrained
     config.model.epsilon = args.epsilon
     
-    config.logging.use_wandb = args.wandb
-    config.logging.wandb_project = args.wandb_project
-    config.logging.log_interval = args.log_interval
-    config.logging.save_interval = args.save_interval
-    config.logging.val_interval = args.val_interval
-    
     config.paths.checkpoint_dir = args.checkpoint_dir
-    config.paths.output_dir = args.output_dir
+    config.paths.log_dir = args.log_dir
     
     config.seed = args.seed
     
-    # Set random seeds
-    set_seed(config.seed)
+    # Set seed for reproducibility
+    L.seed_everything(config.seed, workers=True)
     
-    # Enable cuDNN benchmark for faster training
-    cudnn.benchmark = True
-    
-    # Setup device
-    device = torch.device(config.device)
-    print(f"Using device: {device}")
-    
-    # Initialize W&B if enabled
-    if config.logging.use_wandb:
-        try:
-            import wandb
-            wandb.init(
-                project=config.logging.wandb_project,
-                entity=config.logging.wandb_entity,
-                config=config.to_dict()
-            )
-        except ImportError:
-            print("Warning: wandb not installed. Disabling W&B logging.")
-            config.logging.use_wandb = False
-    
-    # Load dataset
-    print(f"Loading dataset: {config.dataset.dataset_name}")
-    dataset = load_deepfake_dataset(
-        config.dataset.dataset_name,
-        cache_dir=config.dataset.cache_dir
-    )
-    
-    # Set format to keep PIL images - transforms applied on-the-fly in collate_fn
-    # This avoids caching transformed tensors to disk (which causes 90GB+ storage)
-    print("Setting up dataset (transforms applied on-the-fly)...")
-    dataset.set_format(columns=['image', 'label'])
-    
-    # Create dataloaders
-    train_loader = DataLoader(
-        dataset['train'],
+    # Create data module
+    data_module = GPUTransformDataModule(
+        dataset_name=config.dataset.dataset_name,
         batch_size=config.training.batch_size,
-        shuffle=True,
         num_workers=config.dataset.num_workers,
-        collate_fn=collate_fn,
-        pin_memory=True,
-        persistent_workers=config.dataset.num_workers > 0,
-        drop_last=True
+        cache_dir=config.dataset.cache_dir,
     )
     
-    val_loader = DataLoader(
-        dataset['val'],
-        batch_size=config.training.batch_size,
-        shuffle=False,
-        num_workers=config.dataset.num_workers,
-        collate_fn=collate_fn,
-        pin_memory=True,
-        persistent_workers=config.dataset.num_workers > 0
-    )
-    
-    print(f"Train samples: {len(dataset['train'])}")
-    print(f"Val samples: {len(dataset['val'])}")
-    
-    # Initialize models
-    print("Initializing models...")
-    discriminator = DCTDiscriminator(pretrained=config.model.pretrained)
-    generator = UNetGenerator()
-    
-    # Create GPU transform and compile it
-    gpu_transform = get_gpu_transform().to(device)
-    gpu_transform = torch.compile(gpu_transform)
-    
-    # Initialize trainer
-    trainer = DeepfakeGANTrainer(
-        discriminator=discriminator,
-        generator=generator,
-        device=device,
+    # Create model
+    model = DeepfakeGANModule(
+        pretrained=config.model.pretrained,
+        epsilon=config.model.epsilon,
         d_lr=config.training.d_lr,
         g_lr=config.training.g_lr,
-        use_amp=config.training.use_amp,
-        max_grad_norm=config.training.max_grad_norm
+        max_grad_norm=config.training.max_grad_norm,
+        total_epochs=config.training.epochs,
     )
     
-    # Setup schedulers
-    trainer.setup_schedulers(config.training.epochs)
+    # Callbacks
+    callbacks = [
+        # Save best model based on validation accuracy
+        ModelCheckpoint(
+            dirpath=config.paths.checkpoint_dir,
+            filename="best-{epoch:02d}-{val/accuracy:.4f}",
+            monitor="val/accuracy",
+            mode="max",
+            save_top_k=1,
+            save_last=True,
+        ),
+        # Save checkpoints periodically
+        ModelCheckpoint(
+            dirpath=config.paths.checkpoint_dir,
+            filename="checkpoint-{epoch:02d}",
+            every_n_epochs=5,
+            save_top_k=-1,
+        ),
+        # Monitor learning rate
+        LearningRateMonitor(logging_interval="step"),
+        # Progress bar
+        RichProgressBar(),
+        # Early stopping (optional)
+        EarlyStopping(
+            monitor="val/accuracy",
+            patience=10,
+            mode="max",
+            verbose=True,
+        ),
+    ]
     
-    # Resume from checkpoint if specified
-    start_epoch = 0
-    best_val_acc = 0.0
+    # Logger
+    logger = CSVLogger(
+        save_dir=config.paths.log_dir,
+        name="deepfake_gan",
+    )
     
-    if args.resume:
-        print(f"Resuming from checkpoint: {args.resume}")
-        start_epoch, metrics = trainer.load_checkpoint(args.resume)
-        best_val_acc = metrics.get('val_accuracy', 0.0)
-        start_epoch += 1  # Start from next epoch
+    # Create trainer
+    trainer = L.Trainer(
+        max_epochs=config.training.epochs,
+        accelerator=config.accelerator,
+        devices=config.devices,
+        precision=config.training.precision,
+        accumulate_grad_batches=config.training.accumulate_grad_batches,
+        log_every_n_steps=config.logging.log_every_n_steps,
+        val_check_interval=config.logging.val_check_interval,
+        callbacks=callbacks,
+        logger=logger,
+        deterministic=True,
+        fast_dev_run=args.fast_dev_run,
+        enable_progress_bar=True,
+    )
     
-    # Metrics tracking
-    metrics_tracker = MetricsTracker()
-    history: Dict[str, List[float]] = {
-        'd_loss': [], 'g_loss': [],
-        'd_acc_real': [], 'd_acc_fake': [],
-        'val_accuracy': [], 'val_f1': []
-    }
-    
-    # Training loop
-    print(f"\nStarting training for {config.training.epochs} epochs...")
+    # Print config
+    print("\n" + "=" * 60)
+    print("DEEPFAKE DETECTION GAN - Training")
     print("=" * 60)
+    print(f"Dataset: {config.dataset.dataset_name}")
+    print(f"Batch size: {config.training.batch_size}")
+    print(f"Epochs: {config.training.epochs}")
+    print(f"Precision: {config.training.precision}")
+    print(f"Accelerator: {config.accelerator}")
+    print(f"Checkpoint dir: {config.paths.checkpoint_dir}")
+    print("=" * 60 + "\n")
     
-    for epoch in range(start_epoch, config.training.epochs):
-        trainer.discriminator.train()
-        trainer.generator.train()
-        metrics_tracker.reset()
-        
-        # Progress bar for training
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.training.epochs}")
-        
-        for batch_idx, (images, labels) in enumerate(pbar):
-            # Move data to device
-            images = images.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-            
-            # Apply GPU transforms
-            images = gpu_transform(images)
-            
-            # Training step
-            metrics = trainer.train_step(images, labels)
-            
-            if metrics is not None:
-                metrics_tracker.update(metrics)
-                
-                # Update progress bar
-                avg_metrics = metrics_tracker.get_average()
-                pbar.set_postfix({
-                    'd_loss': f"{avg_metrics['d_loss']:.4f}",
-                    'g_loss': f"{avg_metrics['g_loss']:.4f}",
-                    'd_acc': f"{avg_metrics['d_acc_real']:.2%}"
-                })
-                
-                # Log to W&B
-                if config.logging.use_wandb and batch_idx % config.logging.log_interval == 0:
-                    import wandb
-                    wandb.log({
-                        'train/' + k: v for k, v in metrics.items()
-                    }, step=epoch * len(train_loader) + batch_idx)
-        
-        # Epoch metrics
-        epoch_metrics = metrics_tracker.get_average()
-        history['d_loss'].append(epoch_metrics['d_loss'])
-        history['g_loss'].append(epoch_metrics['g_loss'])
-        history['d_acc_real'].append(epoch_metrics['d_acc_real'])
-        history['d_acc_fake'].append(epoch_metrics['d_acc_fake'])
-        
-        print(f"\nEpoch {epoch+1} Summary:")
-        print(metrics_tracker.pretty_print())
-        
-        # Validation
-        if (epoch + 1) % config.logging.val_interval == 0:
-            print("\nRunning validation...")
-            val_metrics = trainer.validate(val_loader, gpu_transform)
-            
-            history['val_accuracy'].append(val_metrics['val_accuracy'])
-            history['val_f1'].append(val_metrics['val_f1'])
-            
-            print(f"  Val Loss: {val_metrics['val_loss']:.4f}")
-            print(f"  Val Accuracy: {val_metrics['val_accuracy']:.2%}")
-            print(f"  Val F1: {val_metrics['val_f1']:.4f}")
-            print(f"  Val Precision: {val_metrics['val_precision']:.4f}")
-            print(f"  Val Recall: {val_metrics['val_recall']:.4f}")
-            
-            if config.logging.use_wandb:
-                import wandb
-                wandb.log({
-                    'val/' + k: v for k, v in val_metrics.items()
-                }, step=(epoch + 1) * len(train_loader))
-            
-            # Save best model
-            if val_metrics['val_accuracy'] > best_val_acc:
-                best_val_acc = val_metrics['val_accuracy']
-                best_path = os.path.join(config.paths.checkpoint_dir, "best_model.pth")
-                trainer.save_checkpoint(best_path, epoch, val_metrics)
-                print(f"  New best model saved! Accuracy: {best_val_acc:.2%}")
-        
-        # Save checkpoint
-        if (epoch + 1) % config.logging.save_interval == 0:
-            checkpoint_path = os.path.join(
-                config.paths.checkpoint_dir, 
-                f"checkpoint_epoch_{epoch+1}.pth"
-            )
-            trainer.save_checkpoint(checkpoint_path, epoch, epoch_metrics)
-            print(f"Checkpoint saved: {checkpoint_path}")
-        
-        # Step learning rate schedulers
-        trainer.step_schedulers()
-        
-        print("-" * 60)
+    # Train
+    trainer.fit(
+        model=model,
+        datamodule=data_module,
+        ckpt_path=args.resume,
+    )
     
-    # Save final model
-    final_path = os.path.join(config.paths.checkpoint_dir, "final_model.pth")
-    trainer.save_checkpoint(final_path, config.training.epochs - 1, epoch_metrics)
-    print(f"\nFinal model saved: {final_path}")
-    
-    # Plot and save training curves
-    curves_path = os.path.join(config.paths.output_dir, "training_curves.png")
-    plot_training_curves(history, curves_path)
-    print(f"Training curves saved: {curves_path}")
-    
-    # Generate sample adversarial examples
-    print("\nGenerating sample adversarial examples...")
-    trainer.discriminator.eval()
-    trainer.generator.eval()
-    
-    sample_images, _ = next(iter(val_loader))
-    sample_images = sample_images[:4].to(device)
-    sample_images = gpu_transform(sample_images)
-    
-    with torch.no_grad():
-        adv_images, perturbation = trainer.generator(sample_images, config.model.epsilon)
-    
-    adv_viz_path = os.path.join(config.paths.output_dir, "adversarial_examples.png")
-    visualize_adversarial_examples(sample_images, adv_images, perturbation, adv_viz_path)
-    print(f"Adversarial examples saved: {adv_viz_path}")
-    
-    # Finish W&B run
-    if config.logging.use_wandb:
-        import wandb
-        wandb.finish()
-    
+    # Print final results
     print("\n" + "=" * 60)
     print("Training completed!")
-    print(f"Best validation accuracy: {best_val_acc:.2%}")
+    print(f"Best model saved to: {config.paths.checkpoint_dir}")
+    print(f"Logs saved to: {config.paths.log_dir}")
     print("=" * 60)
 
 

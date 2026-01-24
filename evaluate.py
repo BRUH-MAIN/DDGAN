@@ -197,6 +197,42 @@ def generate_classification_report(results: Dict) -> str:
     return "\n".join(report)
 
 
+def load_discriminator_from_checkpoint(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
+    """Load discriminator from either Lightning or legacy checkpoint.
+    
+    Args:
+        checkpoint_path: Path to checkpoint file.
+        device: Torch device to load model on.
+        
+    Returns:
+        Loaded discriminator model.
+    """
+    from src.training.trainer import DeepfakeGANModule
+    
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    
+    # Check if it's a Lightning checkpoint
+    if 'state_dict' in checkpoint and any(k.startswith('discriminator.') for k in checkpoint['state_dict'].keys()):
+        # Lightning checkpoint - load via module
+        print("Detected Lightning checkpoint format")
+        module = DeepfakeGANModule.load_from_checkpoint(checkpoint_path, map_location=device)
+        model = module.discriminator
+    elif 'discriminator_state_dict' in checkpoint:
+        # Legacy checkpoint format
+        print("Detected legacy checkpoint format")
+        model = DCTDiscriminator(pretrained=False)
+        model.load_state_dict(checkpoint['discriminator_state_dict'])
+    else:
+        # Try direct state dict
+        print("Attempting direct state dict load")
+        model = DCTDiscriminator(pretrained=False)
+        model.load_state_dict(checkpoint)
+    
+    model = model.to(device)
+    model.eval()
+    return model
+
+
 def main() -> None:
     """Main evaluation function."""
     args = parse_args()
@@ -211,14 +247,10 @@ def main() -> None:
     
     # Load checkpoint
     print(f"Loading checkpoint: {args.checkpoint}")
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     
-    # Initialize model
+    # Initialize model - supports both Lightning and legacy checkpoints
     print("Initializing model...")
-    model = DCTDiscriminator(pretrained=False)
-    model.load_state_dict(checkpoint['discriminator_state_dict'])
-    model = model.to(device)
-    model.eval()
+    model = load_discriminator_from_checkpoint(args.checkpoint, device)
     
     # Create GPU transform
     gpu_transform = get_gpu_transform().to(device)

@@ -1,10 +1,10 @@
 """Training package for deepfake detection GAN."""
 
-from .trainer import DeepfakeGANTrainer
+from .trainer import DeepfakeGANModule
 from .losses import PerceptualLoss, AdversarialLoss, CombinedGeneratorLoss
 
 __all__ = [
-    'DeepfakeGANTrainer',
+    'DeepfakeGANModule',
     'PerceptualLoss',
     'AdversarialLoss',
     'CombinedGeneratorLoss',

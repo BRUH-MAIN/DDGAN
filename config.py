@@ -17,14 +17,14 @@ class DatasetConfig:
     dataset_name: str = "your-dataset/name"  # HuggingFace dataset name
     cache_dir: Optional[str] = None
     num_workers: int = 4
-    
+
 
 @dataclass
 class ModelConfig:
     """Model configuration settings."""
     pretrained: bool = True  # Use pretrained ConvNeXt weights
     epsilon: float = 0.03    # Perturbation strength for generator
-    
+
 
 @dataclass
 class TrainingConfig:
@@ -33,9 +33,10 @@ class TrainingConfig:
     epochs: int = 50
     d_lr: float = 2e-4       # Discriminator learning rate
     g_lr: float = 2e-4       # Generator learning rate
-    use_amp: bool = True     # Use automatic mixed precision
-    max_grad_norm: float = 1.0  # Gradient clipping
-    
+    precision: str = "16-mixed"  # Lightning precision: "32", "16-mixed", "bf16-mixed"
+    max_grad_norm: float = 1.0   # Gradient clipping
+    accumulate_grad_batches: int = 1  # Gradient accumulation
+
 
 @dataclass
 class PathConfig:
@@ -54,12 +55,8 @@ class PathConfig:
 @dataclass
 class LoggingConfig:
     """Logging configuration settings."""
-    wandb_project: Optional[str] = "deepfake-gan"
-    wandb_entity: Optional[str] = None
-    use_wandb: bool = False
-    log_interval: int = 10      # Log every N batches
-    save_interval: int = 5      # Save checkpoint every N epochs
-    val_interval: int = 1       # Validate every N epochs
+    log_every_n_steps: int = 10
+    val_check_interval: float = 1.0  # Validate every epoch (1.0 = every epoch)
 
 
 @dataclass
@@ -72,7 +69,8 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     
     # Device configuration
-    device: str = field(default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu")
+    accelerator: str = field(default_factory=lambda: "gpu" if torch.cuda.is_available() else "cpu")
+    devices: int = 1
     seed: int = 42
     
     @classmethod
@@ -97,7 +95,8 @@ class Config:
             training=training,
             paths=paths,
             logging=logging,
-            device=config_dict.get('device', "cuda" if torch.cuda.is_available() else "cpu"),
+            accelerator=config_dict.get('accelerator', "gpu" if torch.cuda.is_available() else "cpu"),
+            devices=config_dict.get('devices', 1),
             seed=config_dict.get('seed', 42)
         )
     
@@ -122,8 +121,9 @@ class Config:
                 'epochs': self.training.epochs,
                 'd_lr': self.training.d_lr,
                 'g_lr': self.training.g_lr,
-                'use_amp': self.training.use_amp,
+                'precision': self.training.precision,
                 'max_grad_norm': self.training.max_grad_norm,
+                'accumulate_grad_batches': self.training.accumulate_grad_batches,
             },
             'paths': {
                 'checkpoint_dir': self.paths.checkpoint_dir,
@@ -131,14 +131,11 @@ class Config:
                 'output_dir': self.paths.output_dir,
             },
             'logging': {
-                'wandb_project': self.logging.wandb_project,
-                'wandb_entity': self.logging.wandb_entity,
-                'use_wandb': self.logging.use_wandb,
-                'log_interval': self.logging.log_interval,
-                'save_interval': self.logging.save_interval,
-                'val_interval': self.logging.val_interval,
+                'log_every_n_steps': self.logging.log_every_n_steps,
+                'val_check_interval': self.logging.val_check_interval,
             },
-            'device': self.device,
+            'accelerator': self.accelerator,
+            'devices': self.devices,
             'seed': self.seed,
         }
 
