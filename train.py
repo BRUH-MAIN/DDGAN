@@ -196,6 +196,8 @@ def parse_args() -> argparse.Namespace:
                        help="Path to checkpoint to resume from")
     parser.add_argument("--fast_dev_run", action="store_true",
                        help="Run a fast development test")
+    parser.add_argument("--refresh_rate", type=int, default=0,
+                       help="Progress bar refresh rate (0=epoch only, use 50-100 for Kaggle)")
     
     return parser.parse_args()
 
@@ -271,7 +273,8 @@ def main() -> None:
         # Monitor learning rate
         LearningRateMonitor(logging_interval="epoch"),
         # Progress bar - refresh rate controls update frequency
-        TQDMProgressBar(refresh_rate=0),  # 0 = only update at end of epoch
+        # Use refresh_rate=0 for Colab, refresh_rate=50-100 for Kaggle
+        TQDMProgressBar(refresh_rate=args.refresh_rate),
         # Early stopping (optional)
         EarlyStopping(
             monitor="val/accuracy",
