@@ -16,7 +16,7 @@ import torch
 from lightning.pytorch.callbacks import (
     ModelCheckpoint,
     LearningRateMonitor,
-    RichProgressBar,
+    TQDMProgressBar,
     EarlyStopping,
 )
 from lightning.pytorch.loggers import CSVLogger
@@ -215,9 +215,9 @@ def main() -> None:
             save_top_k=-1,
         ),
         # Monitor learning rate
-        LearningRateMonitor(logging_interval="step"),
-        # Progress bar
-        RichProgressBar(),
+        LearningRateMonitor(logging_interval="epoch"),
+        # Progress bar - refresh rate controls update frequency
+        TQDMProgressBar(refresh_rate=0),  # 0 = only update at end of epoch
         # Early stopping (optional)
         EarlyStopping(
             monitor="val/accuracy",
