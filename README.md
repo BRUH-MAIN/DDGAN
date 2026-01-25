@@ -9,6 +9,8 @@ A GAN-based deepfake detector that leverages DCT (Discrete Cosine Transform) fre
 - **ConvNeXt Backbone**: Uses pretrained ConvNeXt-Tiny for powerful feature extraction
 - **PyTorch Lightning**: Efficient, scalable training with automatic mixed precision
 - **HuggingFace Integration**: Easy dataset loading from the HuggingFace Hub
+- **FaceForensics++ Support**: Native support for FF++ image dataset
+- **Data Imbalance Handling**: Multiple strategies including Focal Loss, AAML, and weighted sampling
 
 ## Architecture
 
@@ -35,7 +37,7 @@ pip install -e .
 
 ## Quick Start
 
-### Training
+### Training with HuggingFace Dataset
 
 ```bash
 # Basic training
@@ -46,14 +48,30 @@ python train.py \
     --dataset_name "your-dataset/name" \
     --batch_size 32 \
     --epochs 100 \
-    --d_lr 2e-4 \
-    --g_lr 2e-4 \
-    --precision "16-mixed" \
-    --checkpoint_dir "checkpoints" \
-    --log_dir "logs"
+    --precision "16-mixed"
+```
 
-# Fast development run
-python train.py --dataset_name "your-dataset/name" --fast_dev_run
+### Training with FaceForensics++ Dataset
+
+```bash
+# Basic training with focal loss (recommended for imbalanced data)
+python train_ff.py --data_dir ./images_dataset --epochs 50 --loss_type focal
+
+# Training with AAML (Additive Angular Margin Loss)
+python train_ff.py --data_dir ./images_dataset --loss_type aaml
+
+# Combined approach for best performance
+python train_ff.py --data_dir ./images_dataset --loss_type combined
+
+# Full configuration example
+python train_ff.py \
+    --data_dir ./images_dataset \
+    --batch_size 32 \
+    --epochs 100 \
+    --loss_type focal \
+    --focal_gamma 2.0 \
+    --focal_alpha 0.25 \
+    --precision "16-mixed"
 ```
 
 ### Evaluation
@@ -61,51 +79,69 @@ python train.py --dataset_name "your-dataset/name" --fast_dev_run
 ```bash
 # Evaluate a trained model
 python evaluate.py \
-    --checkpoint checkpoints/best-epoch=XX-val_accuracy=0.XXXX.ckpt \
-    --dataset_name "your-dataset/name" \
-    --split val \
-    --output_dir evaluation_results
+    --checkpoint checkpoints/best-epoch=XX-val_f1=0.XXXX.ckpt \
+    --dataset_name "your-dataset/name"
 ```
+
+## Data Imbalance Handling
+
+The FaceForensics++ dataset has severe class imbalance (6:1 fake:real ratio). We implement multiple strategies:
+
+### Available Loss Functions
+
+| Loss Type | Description | Use Case |
+|-----------|-------------|----------|
+| `bce` | Standard BCE | Baseline |
+| `focal` | Focal Loss | General imbalance |
+| `weighted_bce` | Class-weighted BCE | Simple weighting |
+| `aaml` | Angular Margin Loss | Better feature discrimination |
+| `combined` | Focal + AAML | Best performance |
+
+### Strategies Implemented
+
+1. **Weighted Random Sampling**: Ensures balanced batches without losing data
+2. **Focal Loss**: Down-weights easy examples, focuses on hard ones
+3. **AAML (Additive Angular Margin Loss)**: Improves feature discrimination
+4. **Class Weighting**: Compensates for imbalanced class distribution
+
+See [docs/DATA_IMBALANCE.md](docs/DATA_IMBALANCE.md) for detailed documentation.
 
 ### Command Line Arguments
 
-#### train.py
+#### train_ff.py (FaceForensics++)
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--dataset_name` | None | HuggingFace dataset name |
+| `--data_dir` | ./images_dataset | Path to FF++ images |
 | `--batch_size` | 32 | Training batch size |
-| `--epochs` | 50 | Number of training epochs |
-| `--d_lr` | 2e-4 | Discriminator learning rate |
-| `--g_lr` | 2e-4 | Generator learning rate |
-| `--precision` | "16-mixed" | Training precision (32, 16-mixed, bf16-mixed) |
-| `--epsilon` | 0.03 | Perturbation strength |
-| `--checkpoint_dir` | "checkpoints" | Directory for checkpoints |
-| `--log_dir` | "logs" | Directory for logs |
-| `--resume` | None | Path to checkpoint to resume from |
-| `--fast_dev_run` | False | Run a fast development test |
-
-#### evaluate.py
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--checkpoint` | Required | Path to model checkpoint |
-| `--dataset_name` | None | HuggingFace dataset name |
-| `--split` | "val" | Dataset split (train/val/test) |
-| `--batch_size` | 32 | Evaluation batch size |
-| `--output_dir` | "evaluation_results" | Output directory |
-| `--no_viz` | False | Skip visualization generation |
+| `--epochs` | 50 | Training epochs |
+| `--loss_type` | focal | Loss function type |
+| `--focal_gamma` | 2.0 | Focal loss gamma |
+| `--focal_alpha` | 0.25 | Focal loss alpha |
+| `--aaml_margin` | 0.5 | AAML margin |
+| `--no_weighted_sampling` | False | Disable weighted sampling |
 
 ## Project Structure
 
 ```
 DDGAN/
 ├── main.py              # Entry point
-├── train.py             # Training script (Lightning)
+├── train.py             # Training script (HuggingFace datasets)
+├── train_ff.py          # Training script (FaceForensics++)
 ├── evaluate.py          # Evaluation script
 ├── config.py            # Configuration classes
 ├── pyproject.toml       # Project dependencies
+├── docs/
+│   └── DATA_IMBALANCE.md # Data imbalance documentation
+├── images_dataset/      # FaceForensics++ images
+│   ├── image_dataset_metadata.csv
+│   ├── original/        # Real images
+│   ├── Deepfakes/       # Fake images
+│   ├── Face2Face/       # Fake images
+│   └── ...
 ├── src/
 │   ├── data/
-│   │   ├── dataset.py   # Dataset loading
+│   │   ├── dataset.py   # HuggingFace dataset loading
+│   │   ├── ff_dataset.py # FaceForensics++ dataset
 │   │   └── transforms.py # Image transforms
 │   ├── models/
 │   │   ├── dct_extractor.py  # DCT feature extraction
@@ -113,7 +149,9 @@ DDGAN/
 │   │   └── generator.py      # U-Net Generator
 │   ├── training/
 │   │   ├── trainer.py   # Lightning training module
-│   │   └── losses.py    # Loss functions
+│   │   ├── ff_trainer.py # FF++ trainer with imbalance handling
+│   │   ├── losses.py    # Base loss functions
+│   │   └── imbalance_losses.py # Focal, AAML, weighted losses
 │   └── utils/
 │       ├── metrics.py       # Evaluation metrics
 │       └── visualization.py # Plotting utilities

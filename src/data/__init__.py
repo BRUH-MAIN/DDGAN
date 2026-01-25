@@ -7,6 +7,10 @@ from .transforms import (
     preprocess_function,
     collate_fn,
 )
+from .ff_dataset import (
+    FaceForensicsDataset,
+    create_ff_dataloaders,
+)
 
 __all__ = [
     'load_deepfake_dataset',
@@ -14,4 +18,6 @@ __all__ = [
     'get_gpu_transform',
     'preprocess_function',
     'collate_fn',
+    'FaceForensicsDataset',
+    'create_ff_dataloaders',
 ]
