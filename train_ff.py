@@ -306,8 +306,6 @@ def parse_args() -> argparse.Namespace:
                        help="Label smoothing factor (0.0 to 0.5)")
     parser.add_argument("--d_pretrain_steps", type=int, default=500,
                        help="Steps to pre-train discriminator before generator")
-    parser.add_argument("--use_amp", action="store_true",
-                       help="Enable automatic mixed precision (disabled by default for stability)")
     
     return parser.parse_args()
 
@@ -343,9 +341,6 @@ def main() -> None:
     data_module.setup()
     class_weights = data_module.get_class_weights()
     
-    # Determine if using AMP based on precision and flag
-    use_amp = args.use_amp and args.precision != "32"
-    
     # Create model using V2 trainer with improved stability
     model = FFDeepfakeGANModuleV2(
         pretrained=not args.no_pretrained,
@@ -356,7 +351,6 @@ def main() -> None:
         loss_type=args.loss_type if args.loss_type in ["bce", "focal"] else "focal",
         label_smoothing=args.label_smoothing,
         d_pretrain_steps=args.d_pretrain_steps,
-        use_amp=use_amp,
         class_weights=class_weights,
     )
     
@@ -429,7 +423,6 @@ def main() -> None:
     print(f"D pre-train steps: {args.d_pretrain_steps}")
     print(f"Weighted sampling: {not args.no_weighted_sampling}")
     print(f"Class weights: {class_weights.tolist()}")
-    print(f"Manual AMP: {use_amp}")
     print(f"Learning rates: D={args.d_lr}, G={args.g_lr}")
     print("=" * 60 + "\n")
     

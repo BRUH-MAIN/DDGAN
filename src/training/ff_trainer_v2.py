@@ -16,7 +16,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, OneCycleLR
-from torch.cuda.amp import GradScaler, autocast
 
 from ..models.discriminator import DCTDiscriminator
 from ..models.generator import UNetGenerator
@@ -145,7 +144,6 @@ class FFDeepfakeGANModuleV2(L.LightningModule):
         loss_type: Loss function type ('bce', 'focal')
         label_smoothing: Label smoothing factor (0.0 to 0.5)
         warmup_epochs: Number of warmup epochs
-        use_amp: Whether to use automatic mixed precision
         d_pretrain_steps: Steps to train discriminator only at start
     """
     
@@ -160,7 +158,6 @@ class FFDeepfakeGANModuleV2(L.LightningModule):
         loss_type: str = "focal",
         label_smoothing: float = 0.1,
         warmup_epochs: int = 2,
-        use_amp: bool = False,  # Disable AMP by default for stability
         d_pretrain_steps: int = 500,
         class_weights: Optional[torch.Tensor] = None,
         **kwargs,  # Accept extra args for compatibility
@@ -184,7 +181,6 @@ class FFDeepfakeGANModuleV2(L.LightningModule):
         self.loss_type = loss_type
         self.label_smoothing = label_smoothing
         self.warmup_epochs = warmup_epochs
-        self.use_amp = use_amp
         self.d_pretrain_steps = d_pretrain_steps
         
         # Class weights for imbalanced data
@@ -208,10 +204,6 @@ class FFDeepfakeGANModuleV2(L.LightningModule):
                 label_smoothing=label_smoothing
             )
         
-        # GradScaler for mixed precision (initialized in setup)
-        self.scaler_d = None
-        self.scaler_g = None
-        
         # Validation outputs storage
         self._val_predictions = []
         self._val_labels = []
@@ -221,12 +213,6 @@ class FFDeepfakeGANModuleV2(L.LightningModule):
         self._global_step = 0
         self._nan_count = 0
         self._max_nan_before_reset = 100
-    
-    def setup(self, stage: str = None) -> None:
-        """Setup called before training starts."""
-        if self.use_amp and self.device.type == 'cuda':
-            self.scaler_d = GradScaler()
-            self.scaler_g = GradScaler()
     
     def _validate_images(self, images: torch.Tensor) -> Tuple[torch.Tensor, bool]:
         """Validate and normalize input images.
@@ -250,11 +236,10 @@ class FFDeepfakeGANModuleV2(L.LightningModule):
         self, 
         loss: torch.Tensor, 
         optimizer: torch.optim.Optimizer,
-        scaler: Optional[GradScaler],
         parameters,
         step_name: str
     ) -> bool:
-        """Safely perform backward pass with gradient scaling.
+        """Safely perform backward pass with gradient clipping.
         
         Returns:
             True if successful, False if NaN detected
@@ -267,17 +252,9 @@ class FFDeepfakeGANModuleV2(L.LightningModule):
             return False
         
         optimizer.zero_grad()
-        
-        if scaler is not None:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(parameters, self.max_grad_norm)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(parameters, self.max_grad_norm)
-            optimizer.step()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(parameters, self.max_grad_norm)
+        optimizer.step()
         
         return True
     
@@ -316,21 +293,20 @@ class FFDeepfakeGANModuleV2(L.LightningModule):
         # ===============================
         # Train Discriminator
         # ===============================
-        with autocast(enabled=self.use_amp, device_type='cuda'):
-            # Forward pass on real images
-            real_pred = self.discriminator(real_samples)
-            d_loss_real = self.criterion(real_pred, ones)
-            
-            # Forward pass on fake images
-            fake_pred = self.discriminator(fake_samples)
-            d_loss_fake = self.criterion(fake_pred, zeros)
-            
-            # Total discriminator loss
-            d_loss = d_loss_real + d_loss_fake
+        # Forward pass on real images
+        real_pred = self.discriminator(real_samples)
+        d_loss_real = self.criterion(real_pred, ones)
+        
+        # Forward pass on fake images
+        fake_pred = self.discriminator(fake_samples)
+        d_loss_fake = self.criterion(fake_pred, zeros)
+        
+        # Total discriminator loss
+        d_loss = d_loss_real + d_loss_fake
         
         # Backward pass
         d_success = self._safe_backward(
-            d_loss, d_opt, self.scaler_d, 
+            d_loss, d_opt,
             self.discriminator.parameters(), "discriminator"
         )
         
@@ -341,26 +317,25 @@ class FFDeepfakeGANModuleV2(L.LightningModule):
         # Train Generator (skip during pretrain phase)
         # ===============================
         if self._global_step > self.d_pretrain_steps:
-            with autocast(enabled=self.use_amp, device_type='cuda'):
-                # Generate adversarial images
-                adv_images, perturbation = self.generator(real_samples, self.epsilon)
-                
-                # Forward through discriminator
-                adv_pred = self.discriminator(adv_images)
-                
-                # Generator wants discriminator to classify adversarial as FAKE
-                g_target = torch.zeros(len(real_samples), 1, device=self.device)
-                g_loss_adv = self.criterion(adv_pred, g_target)
-                
-                # L1 regularization on perturbation
-                g_loss_perturb = torch.mean(torch.abs(perturbation))
-                
-                # Total generator loss
-                g_loss = g_loss_adv + 0.01 * g_loss_perturb
+            # Generate adversarial images
+            adv_images, perturbation = self.generator(real_samples, self.epsilon)
+            
+            # Forward through discriminator
+            adv_pred = self.discriminator(adv_images)
+            
+            # Generator wants discriminator to classify adversarial as FAKE
+            g_target = torch.zeros(len(real_samples), 1, device=self.device)
+            g_loss_adv = self.criterion(adv_pred, g_target)
+            
+            # L1 regularization on perturbation
+            g_loss_perturb = torch.mean(torch.abs(perturbation))
+            
+            # Total generator loss
+            g_loss = g_loss_adv + 0.01 * g_loss_perturb
             
             # Backward pass
             g_success = self._safe_backward(
-                g_loss, g_opt, self.scaler_g,
+                g_loss, g_opt,
                 self.generator.parameters(), "generator"
             )
             
