@@ -163,6 +163,11 @@ class FFDeepfakeGANModule(L.LightningModule):
         """Perform a single training step."""
         images, labels = batch
         
+        # Ensure images are in valid range [0, 1] and check for NaN
+        if torch.isnan(images).any() or torch.isinf(images).any():
+            print(f"⚠️  Warning: NaN/Inf detected in input images at batch {batch_idx}")
+            return
+        
         # Get optimizers
         d_opt, g_opt = self.optimizers()
         
@@ -177,9 +182,10 @@ class FFDeepfakeGANModule(L.LightningModule):
         if len(real_samples) == 0 or len(fake_samples) == 0:
             return
         
-        # Create target labels
-        ones = torch.ones(len(real_samples), 1, device=self.device)
-        zeros = torch.zeros(len(fake_samples), 1, device=self.device)
+        # Create target labels with label smoothing for stability
+        # Real: 0.9 instead of 1.0, Fake: 0.1 instead of 0.0
+        ones = torch.ones(len(real_samples), 1, device=self.device) * 0.9
+        zeros = torch.zeros(len(fake_samples), 1, device=self.device) + 0.1
         
         # ===============================
         # Train Discriminator
@@ -194,6 +200,13 @@ class FFDeepfakeGANModule(L.LightningModule):
         fake_pred = self.discriminator(fake_samples)
         d_loss_fake = self._compute_loss(fake_pred, zeros)
         
+        # Check for NaN in loss values
+        if torch.isnan(d_loss_real) or torch.isnan(d_loss_fake):
+            print(f"⚠️  Warning: NaN detected in discriminator loss at batch {batch_idx}")
+            print(f"   d_loss_real: {d_loss_real}, d_loss_fake: {d_loss_fake}")
+            d_opt.zero_grad()  # Clear gradients
+            return
+        
         # Generate adversarial images from real samples
         with torch.no_grad():
             adv_images, _ = self.generator(real_samples, self.epsilon)
@@ -202,12 +215,21 @@ class FFDeepfakeGANModule(L.LightningModule):
         adv_pred = self.discriminator(adv_images)
         d_loss_adv = self._compute_loss(adv_pred, ones)
         
-        # Total discriminator loss
-        d_loss = d_loss_real + d_loss_fake + 0.5 * d_loss_adv
+        # Check for NaN
+        if torch.isnan(d_loss_adv):
+            print(f"⚠️  Warning: NaN detected in adversarial loss at batch {batch_idx}")
+            d_opt.zero_grad()
+            return
+        
+        # Total discriminator loss with smaller weights for stability
+        d_loss = 0.8 * (d_loss_real + d_loss_fake) + 0.2 * d_loss_adv
+        
+        # Clamp loss to prevent extreme values
+        d_loss = torch.clamp(d_loss, min=-100, max=100)
         
         # Backward and step
         self.manual_backward(d_loss)
-        self.clip_gradients(d_opt, gradient_clip_val=self.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), max_norm=self.max_grad_norm)
         d_opt.step()
         
         # ===============================
@@ -218,40 +240,55 @@ class FFDeepfakeGANModule(L.LightningModule):
         # Generate adversarial images
         adv_images, perturbation = self.generator(real_samples, self.epsilon)
         
+        # Check perturbation
+        if torch.isnan(perturbation).any() or torch.isinf(perturbation).any():
+            print(f"⚠️  Warning: NaN/Inf in perturbation at batch {batch_idx}")
+            g_opt.zero_grad()
+            return
+        
         # Forward through discriminator
         adv_pred_for_g = self.discriminator(adv_images)
         
-        # Generator tries to fool discriminator
-        g_target_zeros = torch.zeros(len(real_samples), 1, device=self.device)
-        g_loss_adv = self._compute_loss(adv_pred_for_g, g_target_zeros)
+        # Generator tries to fool discriminator (wants logits < 0, i.e., fake classification)
+        g_target_ones = torch.ones(len(real_samples), 1, device=self.device) * 0.1  # Target fake
+        g_loss_adv = self._compute_loss(adv_pred_for_g, g_target_ones)
         
         # L1 regularization on perturbation
         g_loss_perturb = torch.mean(torch.abs(perturbation))
         
         # Total generator loss
-        g_loss = g_loss_adv + 0.1 * g_loss_perturb
+        g_loss = g_loss_adv + 0.01 * g_loss_perturb  # Reduced perturbation weight
+        
+        # Clamp loss
+        g_loss = torch.clamp(g_loss, min=-100, max=100)
+        
+        # Check for NaN
+        if torch.isnan(g_loss):
+            print(f"⚠️  Warning: NaN detected in generator loss at batch {batch_idx}")
+            g_opt.zero_grad()
+            return
         
         # Backward and step
         self.manual_backward(g_loss)
-        self.clip_gradients(g_opt, gradient_clip_val=self.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=self.max_grad_norm)
         g_opt.step()
         
         # Compute metrics
         with torch.no_grad():
-            d_acc_real = ((real_pred > 0).float() == ones).float().mean()
-            d_acc_fake = ((fake_pred > 0).float() == zeros).float().mean()
-            g_acc_adv = (adv_pred_for_g <= 0).float().mean()
+            d_acc_real = ((real_pred > 0).float() == (ones > 0.5).float()).float().mean()
+            d_acc_fake = ((fake_pred > 0).float() == (zeros > 0.5).float()).float().mean()
+            g_acc_adv = (adv_pred_for_g < 0).float().mean()
         
         # Log metrics
         self.log_dict({
-            'train/d_loss': d_loss,
-            'train/g_loss': g_loss,
-            'train/d_loss_real': d_loss_real,
-            'train/d_loss_fake': d_loss_fake,
-            'train/d_acc_real': d_acc_real,
-            'train/d_acc_fake': d_acc_fake,
-            'train/g_acc_adv': g_acc_adv,
-        }, prog_bar=True, on_step=True, on_epoch=True)
+            'train/d_loss_step': d_loss.detach(),
+            'train/g_loss_step': g_loss.detach(),
+            'train/d_loss_real_step': d_loss_real.detach(),
+            'train/d_loss_fake_step': d_loss_fake.detach(),
+            'train/d_acc_real_step': d_acc_real,
+            'train/d_acc_fake_step': d_acc_fake,
+            'train/g_acc_adv_step': g_acc_adv,
+        }, prog_bar=True, on_step=True, on_epoch=False)
     
     def _compute_loss(
         self, 

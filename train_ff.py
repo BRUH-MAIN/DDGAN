@@ -249,10 +249,10 @@ def parse_args() -> argparse.Namespace:
                        help="Training batch size")
     parser.add_argument("--epochs", type=int, default=50,
                        help="Number of training epochs")
-    parser.add_argument("--d_lr", type=float, default=2e-4,
-                       help="Discriminator learning rate")
-    parser.add_argument("--g_lr", type=float, default=2e-4,
-                       help="Generator learning rate")
+    parser.add_argument("--d_lr", type=float, default=1e-4,
+                       help="Discriminator learning rate (default: 1e-4 for stability)")
+    parser.add_argument("--g_lr", type=float, default=1e-4,
+                       help="Generator learning rate (default: 1e-4 for stability)")
     parser.add_argument("--precision", type=str, default="16-mixed",
                        choices=["32", "16-mixed", "bf16-mixed"],
                        help="Training precision")
