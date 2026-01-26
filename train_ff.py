@@ -2,8 +2,8 @@
 
 This script provides training with:
 - FaceForensics++ image dataset support (local or HuggingFace Hub)
+- Numerically stable training with proper mixed precision handling
 - Multiple data imbalance handling strategies
-- AAML (Additive Angular Margin Loss) support
 - Weighted sampling and focal loss
 
 Usage:
@@ -12,6 +12,9 @@ Usage:
     
     # HuggingFace dataset
     python train_ff.py --hf_dataset username/ff-images-dataset --epochs 50
+    
+    # With FP32 precision for debugging
+    python train_ff.py --hf_dataset username/ff-images-dataset --precision 32
     
     python train_ff.py --help
 """
@@ -35,7 +38,7 @@ from config import get_default_config
 from src.data.ff_dataset import FaceForensicsDataset
 from src.data.hf_dataset import HuggingFaceFFDataset, load_hf_ff_dataset
 from src.data.transforms import get_gpu_transform, cpu_transform
-from src.training.ff_trainer import FFDeepfakeGANModule
+from src.training.ff_trainer_v2 import FFDeepfakeGANModuleV2
 from src.training.imbalance_losses import compute_class_weights
 
 
@@ -298,6 +301,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refresh_rate", type=int, default=0,
                        help="Progress bar refresh rate")
     
+    # V2 trainer specific arguments
+    parser.add_argument("--label_smoothing", type=float, default=0.1,
+                       help="Label smoothing factor (0.0 to 0.5)")
+    parser.add_argument("--d_pretrain_steps", type=int, default=500,
+                       help="Steps to pre-train discriminator before generator")
+    parser.add_argument("--use_amp", action="store_true",
+                       help="Enable automatic mixed precision (disabled by default for stability)")
+    
     return parser.parse_args()
 
 
@@ -332,18 +343,20 @@ def main() -> None:
     data_module.setup()
     class_weights = data_module.get_class_weights()
     
-    # Create model
-    model = FFDeepfakeGANModule(
+    # Determine if using AMP based on precision and flag
+    use_amp = args.use_amp and args.precision != "32"
+    
+    # Create model using V2 trainer with improved stability
+    model = FFDeepfakeGANModuleV2(
         pretrained=not args.no_pretrained,
         epsilon=args.epsilon,
         d_lr=args.d_lr,
         g_lr=args.g_lr,
         total_epochs=args.epochs,
-        loss_type=args.loss_type,
-        focal_gamma=args.focal_gamma,
-        focal_alpha=args.focal_alpha,
-        aaml_margin=args.aaml_margin,
-        aaml_scale=args.aaml_scale,
+        loss_type=args.loss_type if args.loss_type in ["bce", "focal"] else "focal",
+        label_smoothing=args.label_smoothing,
+        d_pretrain_steps=args.d_pretrain_steps,
+        use_amp=use_amp,
         class_weights=class_weights,
     )
     
@@ -383,23 +396,26 @@ def main() -> None:
         name="ff_deepfake_gan",
     )
     
-    # Trainer
+    # Trainer - Use FP32 for stability unless AMP explicitly enabled
+    # Note: Lightning's precision setting is only for automatic optimization
+    # We handle mixed precision manually in FFDeepfakeGANModuleV2
     trainer = L.Trainer(
         max_epochs=args.epochs,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
-        precision=args.precision,
+        precision="32",  # Always use FP32 at framework level; AMP handled manually
         log_every_n_steps=10,
         val_check_interval=1.0,
         callbacks=callbacks,
         logger=logger,
-        deterministic=True,
+        deterministic=False,  # Allow non-deterministic ops for speed
         fast_dev_run=args.fast_dev_run,
+        gradient_clip_val=0.5,  # Additional gradient clipping at trainer level
     )
     
     # Print configuration
     print("\n" + "=" * 60)
-    print("DEEPFAKE DETECTION GAN - FaceForensics++ Training")
+    print("DEEPFAKE DETECTION GAN V2 - FaceForensics++ Training")
     print("=" * 60)
     if args.hf_dataset:
         print(f"Data source: HuggingFace ({args.hf_dataset})")
@@ -408,9 +424,12 @@ def main() -> None:
     print(f"Batch size: {args.batch_size}")
     print(f"Epochs: {args.epochs}")
     print(f"Loss type: {args.loss_type}")
+    print(f"Label smoothing: {args.label_smoothing}")
+    print(f"D pre-train steps: {args.d_pretrain_steps}")
     print(f"Weighted sampling: {not args.no_weighted_sampling}")
     print(f"Class weights: {class_weights.tolist()}")
-    print(f"Precision: {args.precision}")
+    print(f"Manual AMP: {use_amp}")
+    print(f"Learning rates: D={args.d_lr}, G={args.g_lr}")
     print("=" * 60 + "\n")
     
     # Train

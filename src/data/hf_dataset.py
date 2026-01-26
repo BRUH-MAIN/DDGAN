@@ -158,6 +158,15 @@ class HuggingFaceFFDataset(Dataset):
         else:
             image = cpu_transform(image)
         
+        # Validate image tensor - check for NaN/Inf and clamp
+        if torch.is_tensor(image):
+            if torch.isnan(image).any() or torch.isinf(image).any():
+                # Replace corrupted image with zeros (will be skipped in training)
+                image = torch.zeros_like(image)
+            else:
+                # Clamp to valid range [0, 1]
+                image = torch.clamp(image, 0.0, 1.0)
+        
         # Get label (already binary in HF dataset)
         label = item['label']
         
