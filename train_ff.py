@@ -399,6 +399,8 @@ def main() -> None:
     # Trainer - Use FP32 for stability unless AMP explicitly enabled
     # Note: Lightning's precision setting is only for automatic optimization
     # We handle mixed precision manually in FFDeepfakeGANModuleV2
+    # Note: gradient_clip_val is NOT supported with manual optimization (GAN training)
+    # Gradient clipping is handled manually inside FFDeepfakeGANModuleV2.training_step()
     trainer = L.Trainer(
         max_epochs=args.epochs,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
@@ -410,7 +412,6 @@ def main() -> None:
         logger=logger,
         deterministic=False,  # Allow non-deterministic ops for speed
         fast_dev_run=args.fast_dev_run,
-        gradient_clip_val=0.5,  # Additional gradient clipping at trainer level
     )
     
     # Print configuration
