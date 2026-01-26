@@ -1,13 +1,18 @@
 """Training script for Deepfake Detection on FaceForensics++ dataset.
 
 This script provides training with:
-- FaceForensics++ image dataset support
+- FaceForensics++ image dataset support (local or HuggingFace Hub)
 - Multiple data imbalance handling strategies
 - AAML (Additive Angular Margin Loss) support
 - Weighted sampling and focal loss
 
 Usage:
+    # Local dataset
     python train_ff.py --data_dir ./images_dataset --epochs 50
+    
+    # HuggingFace dataset
+    python train_ff.py --hf_dataset username/ff-images-dataset --epochs 50
+    
     python train_ff.py --help
 """
 
@@ -28,6 +33,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from config import get_default_config
 from src.data.ff_dataset import FaceForensicsDataset
+from src.data.hf_dataset import HuggingFaceFFDataset, load_hf_ff_dataset
 from src.data.transforms import get_gpu_transform, cpu_transform
 from src.training.ff_trainer import FFDeepfakeGANModule
 from src.training.imbalance_losses import compute_class_weights
@@ -40,11 +46,15 @@ class FFDataModule(L.LightningDataModule):
     - Weighted sampling for class imbalance
     - GPU transforms for efficiency
     - Proper train/val splitting by video ID
+    - Support for local and HuggingFace datasets
     """
     
     def __init__(
         self,
-        data_dir: str,
+        data_dir: str = None,
+        hf_dataset: str = None,
+        hf_cache_dir: str = None,
+        hf_token: str = None,
         batch_size: int = 32,
         num_workers: int = 4,
         use_weighted_sampling: bool = True,
@@ -54,6 +64,9 @@ class FFDataModule(L.LightningDataModule):
     ):
         super().__init__()
         self.data_dir = data_dir
+        self.hf_dataset = hf_dataset
+        self.hf_cache_dir = hf_cache_dir
+        self.hf_token = hf_token
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.use_weighted_sampling = use_weighted_sampling
@@ -61,6 +74,11 @@ class FFDataModule(L.LightningDataModule):
         self.categories = categories
         self.seed = seed
         
+        # Validate that either data_dir or hf_dataset is provided
+        if data_dir is None and hf_dataset is None:
+            raise ValueError("Either data_dir or hf_dataset must be provided")
+        
+        self.use_huggingface = hf_dataset is not None
         self.gpu_transform = None
         self.train_dataset = None
         self.val_dataset = None
@@ -68,6 +86,39 @@ class FFDataModule(L.LightningDataModule):
     
     def setup(self, stage: str = None):
         """Set up datasets."""
+        if self.use_huggingface:
+            self._setup_huggingface()
+        else:
+            self._setup_local()
+        
+        # Compute class weights from training data
+        train_stats = self.train_dataset.get_statistics()
+        self.class_weights = compute_class_weights(
+            n_fake=train_stats['n_fake'],
+            n_real=train_stats['n_real'],
+            method='effective'  # Best for extreme imbalance
+        )
+        
+        # Print dataset statistics
+        print("\n" + "=" * 60)
+        print("DATASET STATISTICS")
+        print("=" * 60)
+        source = f"HuggingFace: {self.hf_dataset}" if self.use_huggingface else f"Local: {self.data_dir}"
+        print(f"Source: {source}")
+        print(f"Training samples: {train_stats['total_samples']}")
+        print(f"  - Real: {train_stats['n_real']}")
+        print(f"  - Fake: {train_stats['n_fake']}")
+        print(f"  - Imbalance ratio: {train_stats['imbalance_ratio']:.2f}:1")
+        print(f"  - Class weights: fake={self.class_weights[0]:.3f}, real={self.class_weights[1]:.3f}")
+        print(f"\nValidation samples: {self.val_dataset.get_statistics()['total_samples']}")
+        print(f"Categories: {list(train_stats['categories'].keys())}")
+        print("=" * 60 + "\n")
+        
+        # Create GPU transform
+        self.gpu_transform = get_gpu_transform()
+    
+    def _setup_local(self):
+        """Set up local datasets."""
         # Create training dataset
         self.train_dataset = FaceForensicsDataset(
             root_dir=self.data_dir,
@@ -85,30 +136,34 @@ class FFDataModule(L.LightningDataModule):
             split='val',
             seed=self.seed,
         )
-        
-        # Compute class weights from training data
-        train_stats = self.train_dataset.get_statistics()
-        self.class_weights = compute_class_weights(
-            n_fake=train_stats['n_fake'],
-            n_real=train_stats['n_real'],
-            method='effective'  # Best for extreme imbalance
+    
+    def _setup_huggingface(self):
+        """Set up HuggingFace datasets."""
+        # Load dataset from HuggingFace Hub
+        hf_data = load_hf_ff_dataset(
+            repo_id=self.hf_dataset,
+            cache_dir=self.hf_cache_dir,
+            token=self.hf_token,
         )
         
-        # Print dataset statistics
-        print("\n" + "=" * 60)
-        print("DATASET STATISTICS")
-        print("=" * 60)
-        print(f"Training samples: {train_stats['total_samples']}")
-        print(f"  - Real: {train_stats['n_real']}")
-        print(f"  - Fake: {train_stats['n_fake']}")
-        print(f"  - Imbalance ratio: {train_stats['imbalance_ratio']:.2f}:1")
-        print(f"  - Class weights: fake={self.class_weights[0]:.3f}, real={self.class_weights[1]:.3f}")
-        print(f"\nValidation samples: {self.val_dataset.get_statistics()['total_samples']}")
-        print(f"Categories: {list(train_stats['categories'].keys())}")
-        print("=" * 60 + "\n")
+        # Determine validation split name
+        val_split = 'validation' if 'validation' in hf_data else 'val'
+        if val_split not in hf_data:
+            val_split = 'test'  # Fallback to test if no validation
         
-        # Create GPU transform
-        self.gpu_transform = get_gpu_transform()
+        # Create training dataset
+        self.train_dataset = HuggingFaceFFDataset(
+            hf_dataset=hf_data['train'],
+            max_samples_per_category=self.max_samples_per_category,
+            seed=self.seed,
+        )
+        
+        # Create validation dataset
+        self.val_dataset = HuggingFaceFFDataset(
+            hf_dataset=hf_data[val_split],
+            max_samples_per_category=self.max_samples_per_category,
+            seed=self.seed,
+        )
     
     def get_class_weights(self) -> torch.Tensor:
         """Get computed class weights."""
@@ -171,9 +226,19 @@ def parse_args() -> argparse.Namespace:
         description="Train Deepfake Detection on FaceForensics++"
     )
     
-    # Data arguments
-    parser.add_argument("--data_dir", type=str, default="./images_dataset",
-                       help="Path to FaceForensics++ images dataset")
+    # Data arguments - Local
+    parser.add_argument("--data_dir", type=str, default=None,
+                       help="Path to FaceForensics++ images dataset (local)")
+    
+    # Data arguments - HuggingFace
+    parser.add_argument("--hf_dataset", type=str, default=None,
+                       help="HuggingFace dataset ID (e.g., username/ff-images-dataset)")
+    parser.add_argument("--hf_cache_dir", type=str, default=None,
+                       help="Cache directory for HuggingFace datasets")
+    parser.add_argument("--hf_token", type=str, default=None,
+                       help="HuggingFace token for private datasets")
+    
+    # Common data arguments
     parser.add_argument("--num_workers", type=int, default=4,
                        help="Number of data loading workers")
     parser.add_argument("--max_samples", type=int, default=None,
@@ -240,12 +305,21 @@ def main() -> None:
     """Main training function."""
     args = parse_args()
     
+    # Validate data source
+    if args.data_dir is None and args.hf_dataset is None:
+        # Default to local dataset if neither is specified
+        args.data_dir = "./images_dataset"
+        print("No data source specified, using default: ./images_dataset")
+    
     # Set seed
     L.seed_everything(args.seed, workers=True)
     
     # Create data module
     data_module = FFDataModule(
         data_dir=args.data_dir,
+        hf_dataset=args.hf_dataset,
+        hf_cache_dir=args.hf_cache_dir,
+        hf_token=args.hf_token,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         use_weighted_sampling=not args.no_weighted_sampling,
@@ -327,7 +401,10 @@ def main() -> None:
     print("\n" + "=" * 60)
     print("DEEPFAKE DETECTION GAN - FaceForensics++ Training")
     print("=" * 60)
-    print(f"Data directory: {args.data_dir}")
+    if args.hf_dataset:
+        print(f"Data source: HuggingFace ({args.hf_dataset})")
+    else:
+        print(f"Data source: Local ({args.data_dir})")
     print(f"Batch size: {args.batch_size}")
     print(f"Epochs: {args.epochs}")
     print(f"Loss type: {args.loss_type}")

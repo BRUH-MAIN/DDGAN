@@ -11,6 +11,11 @@ from .ff_dataset import (
     FaceForensicsDataset,
     create_ff_dataloaders,
 )
+from .hf_dataset import (
+    HuggingFaceFFDataset,
+    load_hf_ff_dataset,
+    create_hf_ff_dataloaders,
+)
 
 __all__ = [
     'load_deepfake_dataset',
@@ -20,4 +25,7 @@ __all__ = [
     'collate_fn',
     'FaceForensicsDataset',
     'create_ff_dataloaders',
+    'HuggingFaceFFDataset',
+    'load_hf_ff_dataset',
+    'create_hf_ff_dataloaders',
 ]
