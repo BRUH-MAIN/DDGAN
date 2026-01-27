@@ -20,7 +20,12 @@ class DeepfakeGAN(pl.LightningModule):
     - Generator creates adversarial perturbations to test discriminator
     - Discriminator learns to be robust against perturbations
     - Goal: Discriminator that generalizes well to unseen deepfakes
+    
+    Uses manual optimization for proper alternating D/G training.
     """
+    
+    # Enable manual optimization for proper GAN training
+    automatic_optimization = False
     
     def __init__(
         self,
@@ -74,7 +79,8 @@ class DeepfakeGAN(pl.LightningModule):
         # Loss function with class weighting for imbalanced data
         # Dataset is ~88% fake, ~12% real, so weight real samples higher
         # pos_weight > 1 increases recall for positive class (real=1 in BCE)
-        self.register_buffer('pos_weight', torch.tensor([7.0]))  # ~88/12 ratio
+        # Using sqrt of ratio for less aggressive weighting
+        self.register_buffer('pos_weight', torch.tensor([3.0]))  # sqrt(88/12) ≈ 2.7
         self.criterion = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight)
         
         # Metrics storage
@@ -182,16 +188,32 @@ class DeepfakeGAN(pl.LightningModule):
         self.log('train/loss_fake', loss_fake, on_step=False, on_epoch=True)
         self.log('train/loss_adv', loss_adv, on_step=False, on_epoch=True)
         
-        # Return combined loss for backprop
-        total_loss = d_loss + g_loss
+        # ===== MANUAL OPTIMIZATION =====
+        # Get optimizers
+        d_opt, g_opt = self.optimizers()
+        
+        # Step 1: Update Discriminator
+        d_opt.zero_grad()
+        self.manual_backward(d_loss)
+        self.clip_gradients(d_opt, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
+        d_opt.step()
+        
+        # Step 2: Update Generator
+        g_opt.zero_grad()
+        self.manual_backward(g_loss)
+        self.clip_gradients(g_opt, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
+        g_opt.step()
         
         # NaN check
-        if torch.isnan(total_loss):
+        if torch.isnan(d_loss) or torch.isnan(g_loss):
             print(f'[ERROR] NaN loss at batch {batch_idx}!')
             print(f'  d_loss={d_loss}, g_loss={g_loss}')
-            print(f'  loss_real={loss_real}, loss_fake={loss_fake}, loss_adv={loss_adv}')
-        
-        return total_loss
+    
+    def on_train_epoch_end(self):
+        """Step learning rate schedulers at end of epoch"""
+        d_sch, g_sch = self.lr_schedulers()
+        d_sch.step()
+        g_sch.step()
     
     def validation_step(self, batch, batch_idx):
         """Validation step"""
@@ -258,8 +280,8 @@ class DeepfakeGAN(pl.LightningModule):
               f"Rec: {recall:.4f} | F1: {f1:.4f} | AUC: {roc_auc:.4f}")
     
     def configure_optimizers(self):
-        """Configure optimizers and schedulers"""
-        # Separate optimizers for discriminator and generator
+        """Configure separate optimizers for discriminator and generator"""
+        # Discriminator optimizer
         d_optimizer = torch.optim.AdamW(
             self.discriminator.parameters(),
             lr=self.hparams.lr,
@@ -267,43 +289,34 @@ class DeepfakeGAN(pl.LightningModule):
             weight_decay=self.hparams.weight_decay
         )
         
+        # Generator optimizer (slightly lower lr for stability)
         g_optimizer = torch.optim.AdamW(
             self.generator.parameters(),
-            lr=self.hparams.lr,
+            lr=self.hparams.lr * 0.5,  # Generator learns slower
             betas=self.hparams.betas,
             weight_decay=self.hparams.weight_decay
         )
         
-        # Combined optimizer (Lightning handles both)
-        optimizer = torch.optim.AdamW(
-            list(self.discriminator.parameters()) + list(self.generator.parameters()),
-            lr=self.hparams.lr,
-            betas=self.hparams.betas,
-            weight_decay=self.hparams.weight_decay
-        )
-        
-        # Learning rate scheduler
+        # Learning rate schedulers
         if self.hparams.scheduler_type == 'cosine':
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
+            d_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                d_optimizer,
+                T_max=self.hparams.max_epochs,
+                eta_min=1e-6
+            )
+            g_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                g_optimizer,
                 T_max=self.hparams.max_epochs,
                 eta_min=1e-6
             )
         else:
-            scheduler = torch.optim.lr_scheduler.StepLR(
-                optimizer,
-                step_size=10,
-                gamma=0.5
-            )
+            d_scheduler = torch.optim.lr_scheduler.StepLR(d_optimizer, step_size=10, gamma=0.5)
+            g_scheduler = torch.optim.lr_scheduler.StepLR(g_optimizer, step_size=10, gamma=0.5)
         
-        return {
-            'optimizer': optimizer,
-            'lr_scheduler': {
-                'scheduler': scheduler,
-                'interval': 'epoch',
-                'frequency': 1
-            }
-        }
+        return (
+            [d_optimizer, g_optimizer],
+            [d_scheduler, g_scheduler]
+        )
 
 
 if __name__ == "__main__":
