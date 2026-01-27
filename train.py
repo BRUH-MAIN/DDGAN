@@ -111,7 +111,7 @@ def main(args):
         log_every_n_steps=default_config.training.log_every_n_steps,
         val_check_interval=default_config.training.val_check_interval,
         gradient_clip_val=default_config.training.gradient_clip_val,
-        deterministic=True,
+        deterministic=False,  # Set to False to allow benchmark optimization
         benchmark=True  # Enable cudnn benchmarking for faster training
     )
     
