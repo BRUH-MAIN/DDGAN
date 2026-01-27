@@ -4,7 +4,7 @@ Main training script for Deepfake Detection GAN
 import os
 import torch
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping, RichProgressBar
 from pytorch_lightning.loggers import TensorBoardLogger
 import argparse
 
@@ -70,6 +70,9 @@ def main(args):
     # Setup callbacks
     print("\nSetting up callbacks...")
     
+    # Progress bar callback
+    progress_bar = RichProgressBar(refresh_rate=default_config.training.get('refresh_rate', 1))
+    
     # Model checkpoint callback
     checkpoint_callback = ModelCheckpoint(
         dirpath=default_config.training.checkpoint_dir,
@@ -106,13 +109,15 @@ def main(args):
         devices=default_config.training.devices,
         strategy=default_config.training.strategy if default_config.training.devices > 1 else 'auto',
         precision=default_config.training.precision,
-        callbacks=[checkpoint_callback, lr_monitor, early_stopping],
+        callbacks=[progress_bar, checkpoint_callback, lr_monitor, early_stopping],
         logger=logger,
         log_every_n_steps=default_config.training.log_every_n_steps,
         val_check_interval=default_config.training.val_check_interval,
         gradient_clip_val=default_config.training.gradient_clip_val,
         deterministic=False,  # Set to False to allow benchmark optimization
-        benchmark=True  # Enable cudnn benchmarking for faster training
+        benchmark=True,  # Enable cudnn benchmarking for faster training
+        enable_progress_bar=default_config.training.get('refresh_rate', 1) > 0,
+        # Progress bar refresh rate controlled by RichProgressBar callback
     )
     
     # Print trainer info
@@ -164,6 +169,8 @@ if __name__ == "__main__":
                         help='Number of GPUs to use')
     parser.add_argument('--no-pretrained', action='store_true',
                         help='Do not use pretrained weights for discriminator')
+    parser.add_argument('--refresh-rate', type=int, default=1,
+                        help='Progress bar refresh rate (updates per second). Set to 0 to disable.')
     
     args = parser.parse_args()
     
@@ -184,6 +191,8 @@ if __name__ == "__main__":
         default_config.training.devices = args.devices
     if args.no_pretrained:
         default_config.model.d_pretrained = False
+    if hasattr(args, 'refresh_rate'):
+        default_config.training.refresh_rate = args.refresh_rate
     
     # Run training
     main(args)
