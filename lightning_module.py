@@ -71,8 +71,11 @@ class DeepfakeGAN(pl.LightningModule):
             epsilon=epsilon
         )
         
-        # Loss function
-        self.criterion = nn.BCEWithLogitsLoss()
+        # Loss function with class weighting for imbalanced data
+        # Dataset is ~88% fake, ~12% real, so weight real samples higher
+        # pos_weight > 1 increases recall for positive class (real=1 in BCE)
+        self.register_buffer('pos_weight', torch.tensor([7.0]))  # ~88/12 ratio
+        self.criterion = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight)
         
         # Metrics storage
         self.validation_step_outputs = []
@@ -92,12 +95,9 @@ class DeepfakeGAN(pl.LightningModule):
         images, labels = batch
         batch_size = images.size(0)
         
-        # ===== DIAGNOSTIC: Check input data =====
-        if batch_idx < 3:  # Only print for first few batches
-            print(f"\n[DIAG batch={batch_idx}] Input stats:")
-            print(f"  images: min={images.min():.3f}, max={images.max():.3f}, mean={images.mean():.3f}")
-            print(f"  labels: unique={labels.unique().tolist()}, distribution={[(labels==i).sum().item() for i in labels.unique()]}")
-            print(f"  has_nan={torch.isnan(images).any()}, has_inf={torch.isinf(images).any()}")
+        # Check for NaN/inf in inputs
+        if torch.isnan(images).any() or torch.isinf(images).any():
+            print(f"[WARNING] batch={batch_idx}: NaN/inf detected in input images!")
         
         # Separate real and fake images
         # IMPORTANT: Verify label convention from dataset!
@@ -107,10 +107,6 @@ class DeepfakeGAN(pl.LightningModule):
         
         real_images = images[real_mask]
         fake_images = images[fake_mask]
-        
-        # ===== DIAGNOSTIC: Verify label separation =====
-        if batch_idx < 3:
-            print(f'[DIAG batch={batch_idx}] Label separation: num_real={real_images.size(0)}, num_fake={fake_images.size(0)}')
         
         # Handle edge cases where batch might not have both classes
         num_real = real_images.size(0)
@@ -133,13 +129,6 @@ class DeepfakeGAN(pl.LightningModule):
             real_labels = torch.ones(num_real, 1, device=self.device)
             real_outputs = self.discriminator(real_images)
             loss_real = self.criterion(real_outputs, real_labels)
-            
-            # ===== DIAGNOSTIC: Check real outputs =====
-            if batch_idx < 3:
-                print(f"[DIAG batch={batch_idx}] Discriminator on REAL:")
-                print(f"  real_outputs: min={real_outputs.min():.3f}, max={real_outputs.max():.3f}")
-                print(f"  loss_real={loss_real.item():.4f}, has_nan={torch.isnan(loss_real)}")
-            
             with torch.no_grad():
                 d_acc_real = ((real_outputs > 0).float() == real_labels).float().mean()
         
@@ -148,36 +137,15 @@ class DeepfakeGAN(pl.LightningModule):
             fake_labels = torch.zeros(num_fake, 1, device=self.device)
             fake_outputs = self.discriminator(fake_images)
             loss_fake = self.criterion(fake_outputs, fake_labels)
-            
-            # ===== DIAGNOSTIC: Check fake outputs =====
-            if batch_idx < 3:
-                print(f"[DIAG batch={batch_idx}] Discriminator on FAKE:")
-                print(f"  fake_outputs: min={fake_outputs.min():.3f}, max={fake_outputs.max():.3f}")
-                print(f"  loss_fake={loss_fake.item():.4f}, has_nan={torch.isnan(loss_fake)}")
-            
             with torch.no_grad():
                 d_acc_fake = ((fake_outputs > 0).float() == fake_labels).float().mean()
         
         # 3. Generate adversarial images from real images
         if num_real > 0:
             adv_images, perturbation = self.generator(real_images)
-            
-            # ===== DIAGNOSTIC: Check generator output =====
-            if batch_idx < 3:
-                print(f"[DIAG batch={batch_idx}] Generator output:")
-                print(f"  adv_images: min={adv_images.min():.3f}, max={adv_images.max():.3f}, mean={adv_images.mean():.3f}")
-                print(f"  perturbation: min={perturbation.min():.3f}, max={perturbation.max():.3f}")
-                print(f"  adv_has_nan={torch.isnan(adv_images).any()}, adv_has_inf={torch.isinf(adv_images).any()}")
-            
             adv_outputs_d = self.discriminator(adv_images.detach())
             adv_real_labels = torch.ones(num_real, 1, device=self.device)
             loss_adv = self.criterion(adv_outputs_d, adv_real_labels)  # Should still classify as real
-            
-            # ===== DIAGNOSTIC: Check adversarial loss =====
-            if batch_idx < 3:
-                print(f"[DIAG batch={batch_idx}] Adv discriminator:")
-                print(f"  adv_outputs_d: min={adv_outputs_d.min():.3f}, max={adv_outputs_d.max():.3f}")
-                print(f"  loss_adv={loss_adv.item():.4f}, has_nan={torch.isnan(loss_adv)}")
         
         # Combined discriminator loss
         d_loss = loss_real + loss_fake + self.hparams.adv_weight * loss_adv
@@ -214,16 +182,15 @@ class DeepfakeGAN(pl.LightningModule):
         self.log('train/loss_fake', loss_fake, on_step=False, on_epoch=True)
         self.log('train/loss_adv', loss_adv, on_step=False, on_epoch=True)
         
-        # ===== DIAGNOSTIC: Final loss check =====
-        total_loss = d_loss + g_loss
-        if batch_idx < 3 or torch.isnan(total_loss) or torch.isinf(total_loss):
-            print(f'[DIAG batch={batch_idx}] FINAL LOSSES:')
-            print(f'  d_loss={d_loss.item():.4f}, g_loss={g_loss.item():.4f}, total={total_loss.item():.4f}')
-            print(f'  components: loss_real={loss_real.item():.4f}, loss_fake={loss_fake.item():.4f}, loss_adv={loss_adv.item():.4f}')
-            if torch.isnan(total_loss):
-                print(f'  [ERROR] NaN detected! Stopping...')
-        
         # Return combined loss for backprop
+        total_loss = d_loss + g_loss
+        
+        # NaN check
+        if torch.isnan(total_loss):
+            print(f'[ERROR] NaN loss at batch {batch_idx}!')
+            print(f'  d_loss={d_loss}, g_loss={g_loss}')
+            print(f'  loss_real={loss_real}, loss_fake={loss_fake}, loss_adv={loss_adv}')
+        
         return total_loss
     
     def validation_step(self, batch, batch_idx):

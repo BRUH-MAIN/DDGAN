@@ -213,6 +213,11 @@ class DeepfakeDataModule(pl.LightningDataModule):
                     split='train'
                 )
                 
+                # Shuffle train data to ensure balanced batches
+                # (dataset is ordered: all real first, then all fake)
+                train_data = train_data.shuffle(seed=42)
+                print(f"  Shuffled train data for balanced batches")
+                
                 # Try to find validation split
                 val_split_name = 'test'  # Default to 'test'
                 print(f"  Loading {val_split_name} split...")

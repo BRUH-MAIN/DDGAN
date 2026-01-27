@@ -55,7 +55,7 @@ class TrainingConfig:
     
     # Optimization
     gradient_clip_val: float = 1.0
-    precision: str = '32-true'  # Use fp32 for debugging NaN issues (change back to '16-mixed' after)
+    precision: str = '16-mixed'  # Re-enabled after fixing normalization issues
     
     # Scheduler
     scheduler_type: str = 'cosine'
