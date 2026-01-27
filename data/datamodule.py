@@ -92,24 +92,20 @@ class HuggingFaceDeepfakeDataset(Dataset):
     Loads images from HuggingFace dataset
     """
     
-    def __init__(self, hf_dataset, transform=None):
+    def __init__(self, hf_dataset, transform=None, print_stats=True):
         """
         Initialize dataset from HuggingFace
         
         Args:
             hf_dataset: HuggingFace dataset split
             transform: Image transformations
+            print_stats: Whether to print dataset statistics
         """
         self.hf_dataset = hf_dataset
         self.transform = transform
         
-        print(f"Loaded {len(self.hf_dataset)} images from HuggingFace")
-        
-        # Calculate class distribution
-        labels = [item['label'] for item in self.hf_dataset]
-        real_count = sum(1 for label in labels if label == 0)
-        fake_count = sum(1 for label in labels if label == 1)
-        print(f"  Real: {real_count}, Fake: {fake_count}")
+        if print_stats:
+            print(f"Loaded {len(self.hf_dataset)} images from HuggingFace")
     
     def __len__(self):
         return len(self.hf_dataset)
@@ -209,18 +205,38 @@ class DeepfakeDataModule(pl.LightningDataModule):
                     raise ImportError("HuggingFace datasets not available. Install with: pip install datasets")
                 
                 print(f"Loading dataset from HuggingFace: {self.hf_dataset_id}")
-                hf_dataset = load_dataset(self.hf_dataset_id)
                 
-                self.train_dataset = HuggingFaceDeepfakeDataset(
-                    hf_dataset['train'],
-                    transform=self.train_transform
+                # Load train and validation/test splits separately for faster loading
+                # Using trust_remote_code=True and keeping data on disk
+                print("  Loading train split...")
+                train_data = load_dataset(
+                    self.hf_dataset_id, 
+                    split='train',
+                    trust_remote_code=True
                 )
                 
-                # Use 'test' or 'validation' split
-                val_split = 'test' if 'test' in hf_dataset else 'validation'
+                # Try to find validation split
+                val_split_name = 'test'  # Default to 'test'
+                print(f"  Loading {val_split_name} split...")
+                val_data = load_dataset(
+                    self.hf_dataset_id,
+                    split=val_split_name,
+                    trust_remote_code=True
+                )
+                
+                print(f"  Train samples: {len(train_data)}")
+                print(f"  Val samples: {len(val_data)}")
+                
+                self.train_dataset = HuggingFaceDeepfakeDataset(
+                    train_data,
+                    transform=self.train_transform,
+                    print_stats=False
+                )
+                
                 self.val_dataset = HuggingFaceDeepfakeDataset(
-                    hf_dataset[val_split],
-                    transform=self.val_transform
+                    val_data,
+                    transform=self.val_transform,
+                    print_stats=False
                 )
             else:
                 # Load from local directory
