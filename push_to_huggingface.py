@@ -1,205 +1,142 @@
-#!/usr/bin/env python3
-"""Push images_dataset to Hugging Face Hub.
-
-This script uploads the FaceForensics++ image dataset to Hugging Face Hub
-with proper structure for easy loading via the datasets library.
-
-The script reads the HF_TOKEN from .env file for authentication.
-
-Usage:
-    python push_to_huggingface.py --repo_id your-username/ff-images-dataset
-    
-    # Or with custom settings
-    python push_to_huggingface.py \
-        --repo_id your-username/ff-images-dataset \
-        --data_dir ./images_dataset \
-        --private
 """
-
-import argparse
+Push CelebDF-v2 processed dataset to HuggingFace Hub
+"""
 import os
 from pathlib import Path
-
-import pandas as pd
 from dotenv import load_dotenv
-from datasets import Dataset, DatasetDict, Features, Value, Image as HFImage
-from huggingface_hub import HfApi, create_repo, login
+from huggingface_hub import HfApi, create_repo, upload_folder
 from tqdm import tqdm
 
 
-def create_hf_dataset(data_dir: str, split_seed: int = 42) -> DatasetDict:
-    """Create a HuggingFace DatasetDict from the local image dataset.
-    
-    Args:
-        data_dir: Path to the images_dataset directory
-        split_seed: Random seed for train/val/test split
-        
-    Returns:
-        DatasetDict with train, validation, and test splits
+def push_dataset_to_hf(
+    dataset_dir='celebdfv2_images',
+    repo_name='celebdfv2_224',
+    username='RohanRamesh',
+    private=False
+):
     """
-    data_dir = Path(data_dir)
-    metadata_path = data_dir / "image_dataset_metadata.csv"
-    
-    if not metadata_path.exists():
-        raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
-    
-    print(f"Loading metadata from {metadata_path}...")
-    metadata = pd.read_csv(metadata_path)
-    
-    print(f"Total images: {len(metadata)}")
-    print(f"Categories: {metadata['category'].unique().tolist()}")
-    
-    # Split data by video_id to prevent data leakage
-    video_ids = metadata['video_id'].unique()
-    import numpy as np
-    np.random.seed(split_seed)
-    np.random.shuffle(video_ids)
-    
-    n_train = int(len(video_ids) * 0.8)
-    n_val = int(len(video_ids) * 0.1)
-    
-    train_ids = video_ids[:n_train]
-    val_ids = video_ids[n_train:n_train + n_val]
-    test_ids = video_ids[n_train + n_val:]
-    
-    train_df = metadata[metadata['video_id'].isin(train_ids)]
-    val_df = metadata[metadata['video_id'].isin(val_ids)]
-    test_df = metadata[metadata['video_id'].isin(test_ids)]
-    
-    print(f"\nSplit sizes:")
-    print(f"  Train: {len(train_df)} images from {len(train_ids)} videos")
-    print(f"  Val:   {len(val_df)} images from {len(val_ids)} videos")
-    print(f"  Test:  {len(test_df)} images from {len(test_ids)} videos")
-    
-    def df_to_dataset(df: pd.DataFrame, split_name: str) -> Dataset:
-        """Convert DataFrame to HuggingFace Dataset with images."""
-        records = []
-        
-        print(f"\nProcessing {split_name} split...")
-        for _, row in tqdm(df.iterrows(), total=len(df), desc=split_name):
-            img_path = data_dir / row['image_path']
-            if not img_path.exists():
-                print(f"Warning: Image not found: {img_path}")
-                continue
-                
-            # Map label to binary (1 = REAL, 0 = FAKE)
-            binary_label = 1 if row['label'] == 'REAL' else 0
-            
-            records.append({
-                'image': str(img_path),
-                'label': binary_label,
-                'category': row['category'],
-                'video_id': str(row['video_id']),
-                'frame_number': int(row['frame_number']),
-                'label_text': row['label'],
-            })
-        
-        # Create dataset with proper features
-        features = Features({
-            'image': HFImage(),
-            'label': Value('int64'),
-            'category': Value('string'),
-            'video_id': Value('string'),
-            'frame_number': Value('int64'),
-            'label_text': Value('string'),
-        })
-        
-        return Dataset.from_dict(
-            {k: [r[k] for r in records] for k in records[0].keys()},
-            features=features
-        )
-    
-    # Create datasets for each split
-    train_dataset = df_to_dataset(train_df, 'train')
-    val_dataset = df_to_dataset(val_df, 'validation')
-    test_dataset = df_to_dataset(test_df, 'test')
-    
-    return DatasetDict({
-        'train': train_dataset,
-        'validation': val_dataset,
-        'test': test_dataset,
-    })
-
-
-def push_to_hub(
-    dataset: DatasetDict,
-    repo_id: str,
-    token: str,
-    private: bool = False,
-    commit_message: str = "Upload FaceForensics++ image dataset"
-) -> None:
-    """Push dataset to Hugging Face Hub.
+    Push dataset to HuggingFace Hub
     
     Args:
-        dataset: DatasetDict to push
-        repo_id: Repository ID (username/repo-name)
-        token: HuggingFace API token
+        dataset_dir: Local directory containing the dataset
+        repo_name: Name of the HuggingFace repository
+        username: HuggingFace username
         private: Whether to make the repo private
-        commit_message: Commit message for the push
     """
-    print(f"\nPushing dataset to {repo_id}...")
+    # Load environment variables
+    load_dotenv()
+    hf_token = os.getenv('HF_TOKEN')
     
-    # Create repo if it doesn't exist
-    api = HfApi(token=token)
+    if not hf_token:
+        raise ValueError("HF_TOKEN not found in .env file. Please add it.")
+    
+    print("=" * 60)
+    print("PUSHING DATASET TO HUGGINGFACE HUB")
+    print("=" * 60)
+    print(f"Dataset directory: {dataset_dir}")
+    print(f"Repository: {username}/{repo_name}")
+    print(f"Private: {private}")
+    print("=" * 60 + "\n")
+    
+    # Check if dataset directory exists
+    dataset_path = Path(dataset_dir)
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
+    
+    # Count files
+    print("Scanning dataset...")
+    train_real = len(list((dataset_path / 'train' / 'real').glob('*.jpg')))
+    train_fake = len(list((dataset_path / 'train' / 'fake').glob('*.jpg')))
+    test_real = len(list((dataset_path / 'test' / 'real').glob('*.jpg')))
+    test_fake = len(list((dataset_path / 'test' / 'fake').glob('*.jpg')))
+    
+    total_files = train_real + train_fake + test_real + test_fake
+    
+    print(f"\nDataset statistics:")
+    print(f"  Train:")
+    print(f"    Real: {train_real:,} images")
+    print(f"    Fake: {train_fake:,} images")
+    print(f"    Total: {train_real + train_fake:,} images")
+    print(f"  Test:")
+    print(f"    Real: {test_real:,} images")
+    print(f"    Fake: {test_fake:,} images")
+    print(f"    Total: {test_real + test_fake:,} images")
+    print(f"  Total: {total_files:,} images\n")
+    
+    # Initialize HuggingFace API
+    api = HfApi(token=hf_token)
+    
+    # Create repository
+    repo_id = f"{username}/{repo_name}"
+    print(f"Creating repository: {repo_id}...")
+    
     try:
-        create_repo(repo_id, repo_type="dataset", private=private, exist_ok=True, token=token)
-        print(f"Repository {repo_id} ready")
+        create_repo(
+            repo_id=repo_id,
+            token=hf_token,
+            private=private,
+            repo_type="dataset",
+            exist_ok=True
+        )
+        print(f"✓ Repository created/found: https://huggingface.co/datasets/{repo_id}\n")
     except Exception as e:
-        print(f"Note: {e}")
+        print(f"Error creating repository: {e}")
+        return
     
-    # Push dataset
-    dataset.push_to_hub(
-        repo_id,
-        private=private,
-        commit_message=commit_message,
-        token=token,
-    )
-    
-    print(f"\n✅ Dataset successfully pushed to: https://huggingface.co/datasets/{repo_id}")
-
-
-def create_dataset_card(repo_id: str, data_dir: str) -> str:
-    """Create a README.md (dataset card) content for the dataset."""
-    data_dir = Path(data_dir)
-    metadata = pd.read_csv(data_dir / "image_dataset_metadata.csv")
-    
-    categories = metadata['category'].value_counts().to_dict()
-    n_real = len(metadata[metadata['label'] == 'REAL'])
-    n_fake = len(metadata[metadata['label'] == 'FAKE'])
-    
-    card = f"""---
+    # Create README
+    print("Creating README.md...")
+    readme_content = f"""---
 license: cc-by-nc-4.0
 task_categories:
 - image-classification
+- zero-shot-image-classification
 tags:
 - deepfake-detection
-- faceforensics
-- computer-vision
-- binary-classification
+- face
+- synthetic
 size_categories:
 - 100K<n<1M
 ---
 
-# FaceForensics++ Image Dataset
+# CelebDF-v2 224x224 Processed Dataset
 
-This dataset contains preprocessed images from the FaceForensics++ benchmark for deepfake detection.
+This dataset contains preprocessed images from the CelebDF-v2 dataset, resized and face-cropped to 224×224 pixels.
 
 ## Dataset Description
 
-- **Total Images:** {len(metadata):,}
-- **Real Images:** {n_real:,}
-- **Fake Images:** {n_fake:,}
-- **Imbalance Ratio:** {n_fake/n_real:.2f}:1 (fake:real)
+- **Task**: Deepfake detection
+- **Format**: RGB images, 224×224 pixels
+- **Classes**: Real (0) and Fake (1)
+- **Total Images**: {total_files:,}
 
-### Categories
+## Dataset Structure
 
-| Category | Count |
-|----------|-------|
-"""
-    for cat, count in categories.items():
-        card += f"| {cat} | {count:,} |\n"
-    
-    card += f"""
+```
+celebdfv2_224/
+├── train/
+│   ├── real/  ({train_real:,} images)
+│   └── fake/  ({train_fake:,} images)
+└── test/
+    ├── real/  ({test_real:,} images)
+    └── fake/  ({test_fake:,} images)
+```
+
+## Statistics
+
+| Split | Real | Fake | Total |
+|-------|------|------|-------|
+| Train | {train_real:,} | {train_fake:,} | {train_real + train_fake:,} |
+| Test  | {test_real:,} | {test_fake:,} | {test_real + test_fake:,} |
+| **Total** | **{train_real + test_real:,}** | **{train_fake + test_fake:,}** | **{total_files:,}** |
+
+## Preprocessing
+
+The original CelebDF-v2 videos were processed using:
+1. MTCNN face detection
+2. Face cropping with 30% margin
+3. Resizing to 224×224 pixels
+4. Frame extraction (30 frames per video)
+
 ## Usage
 
 ```python
@@ -209,142 +146,88 @@ from datasets import load_dataset
 dataset = load_dataset("{repo_id}")
 
 # Access splits
-train_data = dataset['train']
-val_data = dataset['validation']
-test_data = dataset['test']
-
-# Example: iterate over training data
-for sample in train_data:
-    image = sample['image']  # PIL Image
-    label = sample['label']  # 0 = FAKE, 1 = REAL
-    category = sample['category']  # e.g., 'original', 'Deepfakes', etc.
+train_dataset = dataset['train']
+test_dataset = dataset['test']
 ```
 
-## Dataset Structure
+## Source
 
-Each sample contains:
-- `image`: The face image (PIL Image)
-- `label`: Binary label (0 = FAKE, 1 = REAL)
-- `category`: Original category (original, Deepfakes, Face2Face, FaceSwap, FaceShifter, NeuralTextures, DeepFakeDetection)
-- `video_id`: Source video identifier
-- `frame_number`: Frame number within the video
-- `label_text`: Text label ("REAL" or "FAKE")
+Original dataset: [CelebDF-v2](https://github.com/yuezunli/celeb-deepfakeforensics)
 
-## Splits
+## License
 
-The dataset is split by video ID to prevent data leakage:
-- **Train:** 80% of videos
-- **Validation:** 10% of videos  
-- **Test:** 10% of videos
+This dataset follows the same license as the original CelebDF-v2 dataset (CC BY-NC 4.0).
 
 ## Citation
 
-If you use this dataset, please cite the original FaceForensics++ paper:
+If you use this dataset, please cite the original CelebDF-v2 paper:
 
 ```bibtex
-@inproceedings{{roessler2019faceforensicspp,
-  author = {{Rossler, Andreas and Cozzolino, Davide and Verdoliva, Luisa and Riess, Christian and Thies, Justus and Niessner, Matthias}},
-  title = {{FaceForensics++: Learning to Detect Manipulated Facial Images}},
-  booktitle = {{International Conference on Computer Vision (ICCV)}},
-  year = {{2019}}
+@inproceedings{{li2020celeb,
+  title={{Celeb-DF: A Large-scale Challenging Dataset for DeepFake Forensics}},
+  author={{Li, Yuezun and Yang, Xin and Sun, Pu and Qi, Honggang and Lyu, Siwei}},
+  booktitle={{IEEE Conference on Computer Vision and Pattern Recognition (CVPR)}},
+  year={{2020}}
 }}
 ```
+
+## Processed by
+
+Dataset preprocessed by RohanRamesh for deepfake detection research.
+
+---
+
+**Note**: This dataset is for research purposes only. Use responsibly and ethically.
 """
-    return card
-
-
-def upload_dataset_card(repo_id: str, card_content: str, token: str) -> None:
-    """Upload the dataset card to the repository."""
-    api = HfApi(token=token)
-    api.upload_file(
-        path_or_fileobj=card_content.encode(),
-        path_in_repo="README.md",
-        repo_id=repo_id,
-        repo_type="dataset",
-        token=token,
-    )
-    print("📄 Dataset card uploaded")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Push images_dataset to Hugging Face Hub"
-    )
-    parser.add_argument(
-        "--repo_id",
-        type=str,
-        required=True,
-        help="Hugging Face repository ID (e.g., username/dataset-name)"
-    )
-    parser.add_argument(
-        "--data_dir",
-        type=str,
-        default="./images_dataset",
-        help="Path to the images_dataset directory"
-    )
-    parser.add_argument(
-        "--private",
-        action="store_true",
-        help="Make the repository private"
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for train/val/test split"
-    )
-    parser.add_argument(
-        "--skip_card",
-        action="store_true",
-        help="Skip uploading dataset card"
-    )
     
-    args = parser.parse_args()
+    readme_path = dataset_path / 'README.md'
+    readme_path.write_text(readme_content)
+    print(f"✓ README.md created\n")
     
-    # Load environment variables from .env
-    load_dotenv()
+    # Upload dataset
+    print(f"Uploading dataset to {repo_id}...")
+    print("This may take a while depending on your internet connection...")
+    print("Using large folder upload for better reliability...\n")
     
-    # Get HuggingFace token from environment
-    hf_token = os.getenv("HF_TOKEN")
-    if not hf_token:
-        raise ValueError(
-            "HF_TOKEN not found in environment. "
-            "Please add HF_TOKEN=your_token to your .env file"
+    try:
+        api.upload_large_folder(
+            folder_path=dataset_dir,
+            repo_id=repo_id,
+            repo_type="dataset",
+            allow_patterns=["*.jpg", "*.jpeg", "*.png", "*.txt", "*.md"],
+            ignore_patterns=[".git/*", "__pycache__/*", "*.pyc"],
+            num_workers=4
         )
-    
-    # Login to HuggingFace
-    print("Logging in to Hugging Face...")
-    login(token=hf_token)
-    print("✅ Logged in successfully")
-    
-    # Validate data directory
-    if not os.path.exists(args.data_dir):
-        raise FileNotFoundError(f"Data directory not found: {args.data_dir}")
-    
-    print("\n" + "=" * 60)
-    print("Pushing FaceForensics++ Dataset to Hugging Face Hub")
-    print("=" * 60)
-    print(f"Data directory: {args.data_dir}")
-    print(f"Repository: {args.repo_id}")
-    print(f"Private: {args.private}")
-    print("=" * 60)
-    
-    # Create dataset
-    dataset = create_hf_dataset(args.data_dir, split_seed=args.seed)
-    
-    # Push to hub
-    push_to_hub(dataset, args.repo_id, token=hf_token, private=args.private)
-    
-    # Upload dataset card
-    if not args.skip_card:
-        card_content = create_dataset_card(args.repo_id, args.data_dir)
-        upload_dataset_card(args.repo_id, card_content, token=hf_token)
-    
-    print("\n" + "=" * 60)
-    print("✅ Upload complete!")
-    print(f"View your dataset: https://huggingface.co/datasets/{args.repo_id}")
-    print("=" * 60)
+        print(f"\n✓ Dataset uploaded successfully!")
+        print(f"\n{'=' * 60}")
+        print(f"Dataset available at:")
+        print(f"https://huggingface.co/datasets/{repo_id}")
+        print(f"{'=' * 60}\n")
+        
+    except Exception as e:
+        print(f"\n✗ Error uploading dataset: {e}")
+        print("\nYou can try uploading manually using:")
+        print(f"  huggingface-cli upload {repo_id} {dataset_dir} --repo-type dataset")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Push CelebDF-v2 dataset to HuggingFace')
+    parser.add_argument('--dataset-dir', type=str, default='celebdfv2_images',
+                        help='Path to dataset directory')
+    parser.add_argument('--repo-name', type=str, default='celebdfv2_224',
+                        help='Name of HuggingFace repository')
+    parser.add_argument('--username', type=str, default='RohanRamesh',
+                        help='HuggingFace username')
+    parser.add_argument('--private', action='store_true',
+                        help='Make repository private')
+    
+    args = parser.parse_args()
+    
+    push_dataset_to_hf(
+        dataset_dir=args.dataset_dir,
+        repo_name=args.repo_name,
+        username=args.username,
+        private=args.private
+    )

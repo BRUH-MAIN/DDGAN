@@ -1,208 +1,204 @@
-# Deepfake Detection GAN (DDGAN)
+# Deepfake Detection GAN
 
-A GAN-based deepfake detector that leverages DCT (Discrete Cosine Transform) frequency analysis and adversarial training for robust deepfake detection.
+A robust deepfake detector using GAN-based adversarial training with DCT features and ConvNeXt backbone.
 
-## Features
+## 🎯 Project Overview
 
-- **DCT-based Feature Extraction**: Analyzes frequency domain artifacts left by deepfake generation
-- **Adversarial Training**: Generator creates perturbations to make the discriminator more robust
-- **ConvNeXt Backbone**: Uses pretrained ConvNeXt-Tiny for powerful feature extraction
-- **PyTorch Lightning**: Efficient, scalable training with automatic mixed precision
-- **HuggingFace Integration**: Easy dataset loading from the HuggingFace Hub
-- **FaceForensics++ Support**: Native support for FF++ image dataset
-- **Data Imbalance Handling**: Multiple strategies including Focal Loss, AAML, and weighted sampling
+This project implements a novel approach to deepfake detection by combining:
+- **DCT (Discrete Cosine Transform)** features for frequency-domain analysis
+- **ConvNeXt** backbone with pretrained ImageNet weights
+- **U-Net Generator** for adversarial perturbations
+- **Adversarial robustness training** for better generalization
 
-## Architecture
+## 🏗️ Architecture
 
 ### Discriminator
-- DCT Feature Extractor: Extracts frequency-domain features
-- ConvNeXt-Tiny backbone (pretrained on ImageNet)
-- Classification head with dropout regularization
+- **Input**: RGB images (224×224)
+- **Feature Extraction**: DCT transformation to grayscale frequency features
+- **Backbone**: ConvNeXt-Tiny (27.8M parameters, pretrained on ImageNet)
+- **Output**: Binary classification (real/fake)
 
-### Generator (U-Net)
-- Encoder-decoder architecture with skip connections
-- Frequency-aware bottleneck for DCT-domain processing
-- Outputs bounded perturbations (controlled by epsilon)
+### Generator
+- **Architecture**: U-Net with Frequency-Aware Bottleneck
+- **Purpose**: Generate adversarial perturbations to make discriminator more robust
+- **Output**: Perturbed images with bounded epsilon (default: 0.03)
 
-## Installation
+## 📊 Dataset
+
+**CelebDF-v2** preprocessed into image format:
+```
+celebdfv2_images/
+├── train/
+│   ├── real/
+│   └── fake/
+└── test/
+    ├── real/
+    └── fake/
+```
+
+See [preprocess_celebdfv2.ipynb](preprocess_celebdfv2.ipynb) for preprocessing details.
+
+## 🚀 Quick Start
+
+### 1. Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/DDGAN.git
+# Clone repository
+git clone <repository-url>
 cd DDGAN
 
 # Install dependencies
-pip install -e .
+pip install -r requirements.txt
 ```
 
-## Quick Start
-
-### Training with HuggingFace Dataset
+### 2. Preprocess Dataset (if needed)
 
 ```bash
-# Basic training
-python train.py --dataset_name "your-dataset/name" --epochs 50
+# Run preprocessing notebook
+jupyter notebook preprocess_celebdfv2.ipynb
+```
 
-# Training with custom parameters
+### 3. Train Model
+
+```bash
+# Basic training (with default settings)
+python train.py
+
+# Custom training
 python train.py \
-    --dataset_name "your-dataset/name" \
-    --batch_size 32 \
-    --epochs 100 \
-    --precision "16-mixed"
+    --data-dir celebdfv2_images \
+    --batch-size 32 \
+    --epochs 50 \
+    --lr 2e-4 \
+    --devices 2
 ```
 
-### Training with FaceForensics++ Dataset
+### 4. Monitor Training
 
 ```bash
-# Basic training with focal loss (recommended for imbalanced data)
-python train_ff.py --data_dir ./images_dataset --epochs 50 --loss_type focal
-
-# Training with AAML (Additive Angular Margin Loss)
-python train_ff.py --data_dir ./images_dataset --loss_type aaml
-
-# Combined approach for best performance
-python train_ff.py --data_dir ./images_dataset --loss_type combined
-
-# Full configuration example
-python train_ff.py \
-    --data_dir ./images_dataset \
-    --batch_size 32 \
-    --epochs 100 \
-    --loss_type focal \
-    --focal_gamma 2.0 \
-    --focal_alpha 0.25 \
-    --precision "16-mixed"
+# Launch TensorBoard
+tensorboard --logdir logs
 ```
 
-### Evaluation
-
-```bash
-# Evaluate a trained model
-python evaluate.py \
-    --checkpoint checkpoints/best-epoch=XX-val_f1=0.XXXX.ckpt \
-    --dataset_name "your-dataset/name"
-```
-
-## Data Imbalance Handling
-
-The FaceForensics++ dataset has severe class imbalance (6:1 fake:real ratio). We implement multiple strategies:
-
-### Available Loss Functions
-
-| Loss Type | Description | Use Case |
-|-----------|-------------|----------|
-| `bce` | Standard BCE | Baseline |
-| `focal` | Focal Loss | General imbalance |
-| `weighted_bce` | Class-weighted BCE | Simple weighting |
-| `aaml` | Angular Margin Loss | Better feature discrimination |
-| `combined` | Focal + AAML | Best performance |
-
-### Strategies Implemented
-
-1. **Weighted Random Sampling**: Ensures balanced batches without losing data
-2. **Focal Loss**: Down-weights easy examples, focuses on hard ones
-3. **AAML (Additive Angular Margin Loss)**: Improves feature discrimination
-4. **Class Weighting**: Compensates for imbalanced class distribution
-
-See [docs/DATA_IMBALANCE.md](docs/DATA_IMBALANCE.md) for detailed documentation.
-
-### Command Line Arguments
-
-#### train_ff.py (FaceForensics++)
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--data_dir` | ./images_dataset | Path to FF++ images |
-| `--batch_size` | 32 | Training batch size |
-| `--epochs` | 50 | Training epochs |
-| `--loss_type` | focal | Loss function type |
-| `--focal_gamma` | 2.0 | Focal loss gamma |
-| `--focal_alpha` | 0.25 | Focal loss alpha |
-| `--aaml_margin` | 0.5 | AAML margin |
-| `--no_weighted_sampling` | False | Disable weighted sampling |
-
-## Project Structure
+## 📁 Project Structure
 
 ```
 DDGAN/
-├── main.py              # Entry point
-├── train.py             # Training script (HuggingFace datasets)
-├── train_ff.py          # Training script (FaceForensics++)
-├── evaluate.py          # Evaluation script
-├── config.py            # Configuration classes
-├── pyproject.toml       # Project dependencies
-├── docs/
-│   └── DATA_IMBALANCE.md # Data imbalance documentation
-├── images_dataset/      # FaceForensics++ images
-│   ├── image_dataset_metadata.csv
-│   ├── original/        # Real images
-│   ├── Deepfakes/       # Fake images
-│   ├── Face2Face/       # Fake images
-│   └── ...
-├── src/
-│   ├── data/
-│   │   ├── dataset.py   # HuggingFace dataset loading
-│   │   ├── ff_dataset.py # FaceForensics++ dataset
-│   │   └── transforms.py # Image transforms
-│   ├── models/
-│   │   ├── dct_extractor.py  # DCT feature extraction
-│   │   ├── discriminator.py  # DCT Discriminator
-│   │   └── generator.py      # U-Net Generator
-│   ├── training/
-│   │   ├── trainer.py   # Lightning training module
-│   │   ├── ff_trainer.py # FF++ trainer with imbalance handling
-│   │   ├── losses.py    # Base loss functions
-│   │   └── imbalance_losses.py # Focal, AAML, weighted losses
-│   └── utils/
-│       ├── metrics.py       # Evaluation metrics
-│       └── visualization.py # Plotting utilities
-├── checkpoints/         # Saved models
-└── logs/               # Training logs
+├── config.py                   # Configuration management
+├── train.py                    # Main training script
+├── lightning_module.py         # PyTorch Lightning module
+├── requirements.txt            # Python dependencies
+├── preprocess_celebdfv2.ipynb  # Dataset preprocessing
+├── models/
+│   ├── __init__.py
+│   ├── dct_extractor.py       # DCT feature extractor
+│   ├── discriminator.py       # Discriminator model
+│   └── generator.py           # Generator model
+├── data/
+│   ├── __init__.py
+│   └── datamodule.py          # PyTorch Lightning DataModule
+├── checkpoints/               # Model checkpoints (created during training)
+└── logs/                      # TensorBoard logs (created during training)
 ```
 
-## Training Workflow
+## 🔧 Configuration
 
-1. **Data Loading**: Images loaded from HuggingFace Hub with on-the-fly transforms
-2. **Discriminator Training**:
-   - Real images: labeled as real (1)
-   - Fake images: labeled as fake (0)
-   - Perturbed images: treated as fake to improve robustness
-3. **Generator Training**:
-   - Creates perturbations to fool the discriminator
-   - Adversarial + perceptual loss
-4. **Validation**: Computes accuracy, F1, ROC-AUC on held-out data
+Edit [config.py](config.py) to customize:
+- Data parameters (batch size, augmentations)
+- Model architecture (backbone, channels)
+- Training hyperparameters (learning rate, epochs)
+- Hardware settings (GPUs, precision)
 
-## Checkpoints
+## 📈 Training Details
 
-Lightning automatically saves:
-- `best-epoch=XX-val_accuracy=0.XXXX.ckpt`: Best model by validation accuracy
-- `checkpoint-epoch=XX.ckpt`: Periodic checkpoints (every 5 epochs)
-- `last.ckpt`: Latest model state
+### Adversarial Robustness Training
 
-## Logging
+Unlike traditional GAN training, this approach:
+1. **Discriminator**: Learns to classify real/fake while being robust to perturbations
+2. **Generator**: Creates adversarial perturbations to test discriminator
+3. **Goal**: Discriminator that generalizes well to unseen deepfakes
 
-Training logs are saved as CSV files in the `logs/` directory:
-- `logs/deepfake_gan/version_X/metrics.csv`: All training metrics
-- `logs/deepfake_gan/version_X/hparams.yaml`: Hyperparameters
+### Loss Functions
 
-## Dataset Format
+**Discriminator Loss**:
+```
+L_D = L_real + L_fake + 0.5 × L_adv
+```
 
-The dataset should be in HuggingFace format with:
-- `image`: PIL Image or path to image
-- `label`: 0 for fake, 1 for real
+**Generator Loss**:
+```
+L_G = L_adv + 0.1 × L_perturb
+```
 
-Example datasets:
-- Custom dataset uploaded to HuggingFace Hub
-- Local datasets loaded via `datasets` library
+### Optimization
 
-## Requirements
+- **Optimizer**: AdamW (lr=2e-4, betas=(0.5, 0.999))
+- **Scheduler**: CosineAnnealingLR
+- **Precision**: Mixed (16-bit)
+- **Gradient Clipping**: max_norm=1.0
 
-- Python 3.9+
-- PyTorch 2.1+
-- PyTorch Lightning 2.5+
-- CUDA-capable GPU (recommended)
+## 📊 Expected Results
 
-See [pyproject.toml](pyproject.toml) for full dependency list.
+**Target Performance**:
+- Accuracy: > 80%
+- Precision: > 75%
+- Recall: > 75%
+- F1 Score: > 75%
+- ROC-AUC: > 85%
 
-## License
+**Training Time**:
+- ~10-15 min/epoch on 2× T4 GPUs
+- Total: ~8-12 hours for 50 epochs
 
-MIT License
+## 🧪 Testing Components
+
+Test individual components:
+
+```bash
+# Test DCT extractor
+python -m models.dct_extractor
+
+# Test Discriminator
+python -m models.discriminator
+
+# Test Generator
+python -m models.generator
+
+# Test DataModule
+python -m data.datamodule
+
+# Test Lightning module
+python lightning_module.py
+```
+
+## 📝 Key Features
+
+1. **DCT Features**: Frequency-domain analysis captures deepfake artifacts
+2. **Transfer Learning**: Pretrained ConvNeXt weights accelerate training
+3. **Adversarial Training**: Generator improves discriminator robustness
+4. **Mixed Precision**: 2-3× speedup with AMP
+5. **PyTorch Lightning**: Professional training pipeline with DDP support
+
+## 🔬 Research Background
+
+This implementation is based on insights from:
+- Frequency-domain deepfake detection research
+- Adversarial robustness training techniques
+- Modern CNN architectures (ConvNeXt)
+- U-Net for image-to-image translation
+
+## 📄 License
+
+[Add your license here]
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## 📧 Contact
+
+[Add your contact information here]
+
+---
+
+**Note**: This project is for research and educational purposes. Use responsibly and ethically.

@@ -1,337 +1,189 @@
-"""Training script for Deepfake Detection GAN using PyTorch Lightning.
-
-This script handles the complete training pipeline including data loading,
-model initialization, and training with automatic checkpointing and logging.
-
-Usage:
-    python train.py --dataset_name "your-dataset/name" --epochs 50
-    python train.py --help
 """
-
-import argparse
+Main training script for Deepfake Detection GAN
+"""
 import os
-
-import lightning as L
 import torch
-from lightning.pytorch.callbacks import (
-    ModelCheckpoint,
-    LearningRateMonitor,
-    TQDMProgressBar,
-    EarlyStopping,
-)
-from lightning.pytorch.loggers import CSVLogger
-from torch.utils.data import DataLoader
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
+from pytorch_lightning.loggers import TensorBoardLogger
+import argparse
 
-from config import get_default_config
-from src.data.dataset import load_deepfake_dataset
-from src.data.transforms import collate_fn, get_gpu_transform
-from src.training.trainer import DeepfakeGANModule
+from config import default_config
+from data import DeepfakeDataModule
+from lightning_module import DeepfakeGAN
 
 
-from datasets import concatenate_datasets
-
-class GPUTransformDataModule(L.LightningDataModule):
-    """Lightning DataModule that applies GPU transforms.
+def main(args):
+    """Main training function"""
     
-    Wraps the dataset and applies GPU transforms during batch transfer.
-    """
+    # Set random seed for reproducibility
+    pl.seed_everything(default_config.seed)
     
-    def __init__(
-        self,
-        dataset_name: str,
-        batch_size: int = 32,
-        num_workers: int = 4,
-        cache_dir: str = None,
-        val_to_train_ratio: float = 0.0,
-        test_to_train_ratio: float = 0.0,
-    ):
-        super().__init__()
-        self.dataset_name = dataset_name
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.cache_dir = cache_dir
-        self.val_to_train_ratio = val_to_train_ratio
-        self.test_to_train_ratio = test_to_train_ratio
-        self.gpu_transform = None
-        self.train_dataset = None
-        self.val_dataset = None
-    
-    def prepare_data(self):
-        """Download data if needed."""
-        # This will download and cache the dataset
-        load_deepfake_dataset(self.dataset_name, cache_dir=self.cache_dir)
-    
-    def setup(self, stage: str = None):
-        """Set up datasets for each stage."""
-        dataset = load_deepfake_dataset(
-            self.dataset_name, 
-            cache_dir=self.cache_dir
-        )
-        
-        train_data = dataset['train']
-        val_data = dataset['val']
-        test_data = dataset.get('test', None)
-        
-        datasets_to_concat = [train_data]
-        
-        # Move portion of validation to training
-        if self.val_to_train_ratio > 0:
-            n_val_to_move = int(len(val_data) * self.val_to_train_ratio)
-            if n_val_to_move > 0:
-                val_data = val_data.shuffle(seed=42)
-                val_to_train = val_data.select(range(n_val_to_move))
-                val_data = val_data.select(range(n_val_to_move, len(val_data)))
-                datasets_to_concat.append(val_to_train)
-                print(f"Moving {n_val_to_move} samples from val to train")
-        
-        # Move portion of test to training
-        if self.test_to_train_ratio > 0 and test_data is not None:
-            n_test_to_move = int(len(test_data) * self.test_to_train_ratio)
-            if n_test_to_move > 0:
-                test_data = test_data.shuffle(seed=42)
-                test_to_train = test_data.select(range(n_test_to_move))
-                datasets_to_concat.append(test_to_train)
-                print(f"Moving {n_test_to_move} samples from test to train")
-        
-        # Concatenate all training data
-        if len(datasets_to_concat) > 1:
-            self.train_dataset = concatenate_datasets(datasets_to_concat)
-        else:
-            self.train_dataset = train_data
-        
-        self.val_dataset = val_data
-        
-        # Set format
-        self.train_dataset.set_format(columns=['image', 'label'])
-        self.val_dataset.set_format(columns=['image', 'label'])
-        
-        print(f"Final train size: {len(self.train_dataset)}")
-        print(f"Final val size: {len(self.val_dataset)}")
-        
-        # Create GPU transform
-        self.gpu_transform = get_gpu_transform()
-    
-    def train_dataloader(self):
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            collate_fn=collate_fn,
-            pin_memory=True,
-            persistent_workers=self.num_workers > 0,
-            drop_last=True,
-        )
-    
-    def val_dataloader(self):
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            collate_fn=collate_fn,
-            pin_memory=True,
-            persistent_workers=self.num_workers > 0,
-        )
-    
-    def on_after_batch_transfer(self, batch, dataloader_idx):
-        """Apply GPU transforms after batch is transferred to GPU."""
-        images, labels = batch
-        if self.gpu_transform is not None:
-            # Move transform to same device as images
-            if not hasattr(self, '_transform_device') or self._transform_device != images.device:
-                self.gpu_transform = self.gpu_transform.to(images.device)
-                self._transform_device = images.device
-            images = self.gpu_transform(images)
-        return images, labels
-
-
-def parse_args() -> argparse.Namespace:
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Train Deepfake Detection GAN")
-    
-    # Dataset arguments
-    parser.add_argument("--dataset_name", type=str, default=None,
-                       help="HuggingFace dataset name")
-    parser.add_argument("--cache_dir", type=str, default=None,
-                       help="Cache directory for datasets")
-    parser.add_argument("--num_workers", type=int, default=4,
-                       help="Number of data loading workers")
-    
-    # Training arguments
-    parser.add_argument("--batch_size", type=int, default=32,
-                       help="Training batch size")
-    parser.add_argument("--epochs", type=int, default=50,
-                       help="Number of training epochs")
-    parser.add_argument("--d_lr", type=float, default=2e-4,
-                       help="Discriminator learning rate")
-    parser.add_argument("--g_lr", type=float, default=2e-4,
-                       help="Generator learning rate")
-    parser.add_argument("--precision", type=str, default="16-mixed",
-                       choices=["32", "16-mixed", "bf16-mixed"],
-                       help="Training precision")
-    
-    # Model arguments
-    parser.add_argument("--no_pretrained", action="store_true",
-                       help="Don't use pretrained weights")
-    parser.add_argument("--epsilon", type=float, default=0.03,
-                       help="Perturbation strength")
-    
-    # Path arguments
-    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints",
-                       help="Directory for checkpoints")
-    parser.add_argument("--log_dir", type=str, default="logs",
-                       help="Directory for logs")
-    
-    # Data split arguments
-    parser.add_argument("--val_to_train", type=float, default=0.0,
-                       help="Fraction of validation data to move to training (0.0-1.0)")
-    parser.add_argument("--test_to_train", type=float, default=0.0,
-                       help="Fraction of test data to move to training (0.0-1.0)")
-    
-    # Other arguments
-    parser.add_argument("--seed", type=int, default=42,
-                       help="Random seed")
-    parser.add_argument("--resume", type=str, default=None,
-                       help="Path to checkpoint to resume from")
-    parser.add_argument("--fast_dev_run", action="store_true",
-                       help="Run a fast development test")
-    parser.add_argument("--refresh_rate", type=int, default=0,
-                       help="Progress bar refresh rate (0=epoch only, use 50-100 for Kaggle)")
-    
-    return parser.parse_args()
-
-
-def main() -> None:
-    """Main training function."""
-    args = parse_args()
-    
-    # Load default config and override with args
-    config = get_default_config()
-    
-    if args.dataset_name:
-        config.dataset.dataset_name = args.dataset_name
-    if args.cache_dir:
-        config.dataset.cache_dir = args.cache_dir
-    config.dataset.num_workers = args.num_workers
-    
-    config.training.batch_size = args.batch_size
-    config.training.epochs = args.epochs
-    config.training.d_lr = args.d_lr
-    config.training.g_lr = args.g_lr
-    config.training.precision = args.precision
-    
-    config.model.pretrained = not args.no_pretrained
-    config.model.epsilon = args.epsilon
-    
-    config.paths.checkpoint_dir = args.checkpoint_dir
-    config.paths.log_dir = args.log_dir
-    
-    config.seed = args.seed
-    
-    # Set seed for reproducibility
-    L.seed_everything(config.seed, workers=True)
-    
-    # Create data module
-    data_module = GPUTransformDataModule(
-        dataset_name=config.dataset.dataset_name,
-        batch_size=config.training.batch_size,
-        num_workers=config.dataset.num_workers,
-        cache_dir=config.dataset.cache_dir,
-        val_to_train_ratio=args.val_to_train,
-        test_to_train_ratio=args.test_to_train,
-    )
-    
-    # Create model
-    model = DeepfakeGANModule(
-        pretrained=config.model.pretrained,
-        epsilon=config.model.epsilon,
-        d_lr=config.training.d_lr,
-        g_lr=config.training.g_lr,
-        max_grad_norm=config.training.max_grad_norm,
-        total_epochs=config.training.epochs,
-    )
-    
-    # Callbacks
-    callbacks = [
-        # Save best model based on validation accuracy
-        ModelCheckpoint(
-            dirpath=config.paths.checkpoint_dir,
-            filename="best-{epoch:02d}-{val/accuracy:.4f}",
-            monitor="val/accuracy",
-            mode="max",
-            save_top_k=1,
-            save_last=True,
-        ),
-        # Save checkpoints periodically
-        ModelCheckpoint(
-            dirpath=config.paths.checkpoint_dir,
-            filename="checkpoint-{epoch:02d}",
-            every_n_epochs=5,
-            save_top_k=-1,
-        ),
-        # Monitor learning rate
-        LearningRateMonitor(logging_interval="epoch"),
-        # Progress bar - refresh rate controls update frequency
-        # Use refresh_rate=0 for Colab, refresh_rate=50-100 for Kaggle
-        TQDMProgressBar(refresh_rate=args.refresh_rate),
-        # Early stopping (optional)
-        EarlyStopping(
-            monitor="val/accuracy",
-            patience=10,
-            mode="max",
-            verbose=True,
-        ),
-    ]
-    
-    # Logger
-    logger = CSVLogger(
-        save_dir=config.paths.log_dir,
-        name="deepfake_gan",
-    )
-    
-    # Create trainer
-    trainer = L.Trainer(
-        max_epochs=config.training.epochs,
-        accelerator=config.accelerator,
-        devices=config.devices,
-        precision=config.training.precision,
-        accumulate_grad_batches=config.training.accumulate_grad_batches,
-        log_every_n_steps=config.logging.log_every_n_steps,
-        val_check_interval=config.logging.val_check_interval,
-        callbacks=callbacks,
-        logger=logger,
-        deterministic=True,
-        fast_dev_run=args.fast_dev_run,
-        enable_progress_bar=True,
-    )
-    
-    # Print config
-    print("\n" + "=" * 60)
-    print("DEEPFAKE DETECTION GAN - Training")
+    # Print configuration
     print("=" * 60)
-    print(f"Dataset: {config.dataset.dataset_name}")
-    print(f"Batch size: {config.training.batch_size}")
-    print(f"Epochs: {config.training.epochs}")
-    print(f"Precision: {config.training.precision}")
-    print(f"Accelerator: {config.accelerator}")
-    print(f"Checkpoint dir: {config.paths.checkpoint_dir}")
+    print("DEEPFAKE DETECTION GAN - TRAINING")
+    print("=" * 60)
+    print(f"Experiment: {default_config.experiment_name}")
+    
+    # Print dataset source
+    if default_config.data.hf_dataset_id:
+        print(f"Dataset: {default_config.data.hf_dataset_id} (HuggingFace)")
+    else:
+        print(f"Dataset: {default_config.data.dataset_root} (Local)")
+    
+    print(f"Batch size: {default_config.data.batch_size}")
+    print(f"Max epochs: {default_config.training.max_epochs}")
+    print(f"Learning rate: {default_config.training.learning_rate}")
+    print(f"Devices: {default_config.training.devices} {default_config.training.accelerator}")
+    print(f"Precision: {default_config.training.precision}")
     print("=" * 60 + "\n")
     
-    # Train
-    trainer.fit(
-        model=model,
-        datamodule=data_module,
-        ckpt_path=args.resume,
+    # Initialize DataModule
+    print("Initializing DataModule...")
+    datamodule = DeepfakeDataModule(
+        data_dir=str(default_config.data.dataset_root) if not default_config.data.hf_dataset_id else None,
+        hf_dataset_id=default_config.data.hf_dataset_id,
+        batch_size=default_config.data.batch_size,
+        num_workers=default_config.data.num_workers,
+        pin_memory=default_config.data.pin_memory,
+        persistent_workers=default_config.data.persistent_workers,
+        mean=default_config.data.mean,
+        std=default_config.data.std
     )
     
-    # Print final results
+    # Initialize model
+    print("\nInitializing Model...")
+    model = DeepfakeGAN(
+        d_backbone=default_config.model.d_backbone,
+        d_pretrained=default_config.model.d_pretrained,
+        g_base_channels=default_config.model.g_base_channels,
+        epsilon=default_config.model.epsilon,
+        lr=default_config.training.learning_rate,
+        betas=default_config.training.betas,
+        weight_decay=default_config.training.weight_decay,
+        adv_weight=default_config.training.adv_weight,
+        perturb_weight=default_config.training.perturb_weight,
+        scheduler_type=default_config.training.scheduler_type,
+        max_epochs=default_config.training.max_epochs
+    )
+    
+    # Setup callbacks
+    print("\nSetting up callbacks...")
+    
+    # Model checkpoint callback
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=default_config.training.checkpoint_dir,
+        filename='{epoch:02d}-{val/accuracy:.4f}',
+        monitor='val/accuracy',
+        mode='max',
+        save_top_k=default_config.training.save_top_k,
+        save_last=True,
+        verbose=True
+    )
+    
+    # Learning rate monitor
+    lr_monitor = LearningRateMonitor(logging_interval='epoch')
+    
+    # Early stopping (optional)
+    early_stopping = EarlyStopping(
+        monitor='val/accuracy',
+        patience=10,
+        mode='max',
+        verbose=True
+    )
+    
+    # Logger
+    logger = TensorBoardLogger(
+        save_dir='logs',
+        name=default_config.experiment_name
+    )
+    
+    # Initialize trainer
+    print("\nInitializing Trainer...")
+    trainer = pl.Trainer(
+        max_epochs=default_config.training.max_epochs,
+        accelerator=default_config.training.accelerator,
+        devices=default_config.training.devices,
+        strategy=default_config.training.strategy if default_config.training.devices > 1 else 'auto',
+        precision=default_config.training.precision,
+        callbacks=[checkpoint_callback, lr_monitor, early_stopping],
+        logger=logger,
+        log_every_n_steps=default_config.training.log_every_n_steps,
+        val_check_interval=default_config.training.val_check_interval,
+        gradient_clip_val=default_config.training.gradient_clip_val,
+        deterministic=True,
+        benchmark=True  # Enable cudnn benchmarking for faster training
+    )
+    
+    # Print trainer info
+    print(f"\nTrainer configuration:")
+    print(f"  Max epochs: {trainer.max_epochs}")
+    print(f"  Precision: {trainer.precision}")
+    print(f"  Accelerator: {trainer.accelerator}")
+    print(f"  Devices: {trainer.num_devices}")
+    print(f"  Strategy: {trainer.strategy.__class__.__name__}")
+    print(f"  Gradient clipping: {trainer.gradient_clip_val}")
+    
+    # Start training
     print("\n" + "=" * 60)
-    print("Training completed!")
-    print(f"Best model saved to: {config.paths.checkpoint_dir}")
-    print(f"Logs saved to: {config.paths.log_dir}")
+    print("STARTING TRAINING")
+    print("=" * 60 + "\n")
+    
+    try:
+        trainer.fit(model, datamodule=datamodule)
+    except KeyboardInterrupt:
+        print("\n\nTraining interrupted by user!")
+    
+    # Print best model info
+    print("\n" + "=" * 60)
+    print("TRAINING COMPLETE")
     print("=" * 60)
+    print(f"Best model checkpoint: {checkpoint_callback.best_model_path}")
+    print(f"Best validation accuracy: {checkpoint_callback.best_model_score:.4f}")
+    print("=" * 60 + "\n")
+    
+    # Save final model
+    final_model_path = default_config.training.checkpoint_dir / 'final_model.ckpt'
+    trainer.save_checkpoint(final_model_path)
+    print(f"Final model saved to: {final_model_path}\n")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Train Deepfake Detection GAN')
+    parser.add_argument('--data-dir', type=str, default='celebdfv2_images',
+                        help='Path to local dataset directory')
+    parser.add_argument('--hf-dataset', type=str, default=None,
+                        help='HuggingFace dataset ID (e.g., RohanRamesh/celebdfv2_224)')
+    parser.add_argument('--batch-size', type=int, default=32,
+                        help='Batch size for training')
+    parser.add_argument('--epochs', type=int, default=50,
+                        help='Number of training epochs')
+    parser.add_argument('--lr', type=float, default=2e-4,
+                        help='Learning rate')
+    parser.add_argument('--devices', type=int, default=2,
+                        help='Number of GPUs to use')
+    parser.add_argument('--no-pretrained', action='store_true',
+                        help='Do not use pretrained weights for discriminator')
+    
+    args = parser.parse_args()
+    
+    # Update config with command line arguments
+    if args.hf_dataset:
+        default_config.data.hf_dataset_id = args.hf_dataset
+        default_config.data.dataset_root = None
+    elif args.data_dir:
+        default_config.data.dataset_root = args.data_dir
+        default_config.data.hf_dataset_id = None
+    if args.batch_size:
+        default_config.data.batch_size = args.batch_size
+    if args.epochs:
+        default_config.training.max_epochs = args.epochs
+    if args.lr:
+        default_config.training.learning_rate = args.lr
+    if args.devices:
+        default_config.training.devices = args.devices
+    if args.no_pretrained:
+        default_config.model.d_pretrained = False
+    
+    # Run training
+    main(args)

@@ -1,0 +1,13 @@
+adv_weight: 0.5
+betas: !!python/tuple
+- 0.5
+- 0.999
+d_backbone: convnext_tiny
+d_pretrained: true
+epsilon: 0.03
+g_base_channels: 64
+lr: 0.0002
+max_epochs: 5
+perturb_weight: 0.1
+scheduler_type: cosine
+weight_decay: 0.01
