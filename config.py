@@ -65,6 +65,7 @@ class TrainingConfig:
     val_check_interval: float = 1.0
     save_top_k: int = 3
     checkpoint_dir: Path = Path('checkpoints')
+    refresh_rate: int = 1  # Progress bar refresh rate (updates per second)
     
     # Hardware
     accelerator: str = 'gpu'

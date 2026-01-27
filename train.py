@@ -71,7 +71,7 @@ def main(args):
     print("\nSetting up callbacks...")
     
     # Progress bar callback
-    progress_bar = RichProgressBar(refresh_rate=default_config.training.get('refresh_rate', 1))
+    progress_bar = RichProgressBar(refresh_rate=default_config.training.refresh_rate)
     
     # Model checkpoint callback
     checkpoint_callback = ModelCheckpoint(
@@ -116,7 +116,7 @@ def main(args):
         gradient_clip_val=default_config.training.gradient_clip_val,
         deterministic=False,  # Set to False to allow benchmark optimization
         benchmark=True,  # Enable cudnn benchmarking for faster training
-        enable_progress_bar=default_config.training.get('refresh_rate', 1) > 0,
+        enable_progress_bar=default_config.training.refresh_rate > 0,
         # Progress bar refresh rate controlled by RichProgressBar callback
     )
     

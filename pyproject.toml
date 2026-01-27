@@ -18,6 +18,7 @@ dependencies = [
     "pillow>=12.1.0",
     "python-dotenv>=1.0.0",
     "pytorch-lightning>=2.6.0",
+    "rich>=14.3.1",
     "scikit-learn>=1.8.0",
     "scipy>=1.17.0",
     "tensorboard>=2.20.0",
