@@ -92,12 +92,25 @@ class DeepfakeGAN(pl.LightningModule):
         images, labels = batch
         batch_size = images.size(0)
         
+        # ===== DIAGNOSTIC: Check input data =====
+        if batch_idx < 3:  # Only print for first few batches
+            print(f"\n[DIAG batch={batch_idx}] Input stats:")
+            print(f"  images: min={images.min():.3f}, max={images.max():.3f}, mean={images.mean():.3f}")
+            print(f"  labels: unique={labels.unique().tolist()}, distribution={[(labels==i).sum().item() for i in labels.unique()]}")
+            print(f"  has_nan={torch.isnan(images).any()}, has_inf={torch.isinf(images).any()}")
+        
         # Separate real and fake images
-        real_mask = labels == 0  # Assuming 0 is real, 1 is fake
-        fake_mask = labels == 1
+        # IMPORTANT: Verify label convention from dataset!
+        # HuggingFace celebdfv2: 0='real', 1='fake' (index-based from folder order)
+        real_mask = labels == 0  # 0 = real
+        fake_mask = labels == 1  # 1 = fake
         
         real_images = images[real_mask]
         fake_images = images[fake_mask]
+        
+        # ===== DIAGNOSTIC: Verify label separation =====
+        if batch_idx < 3:
+            print(f'[DIAG batch={batch_idx}] Label separation: num_real={real_images.size(0)}, num_fake={fake_images.size(0)}')
         
         # Handle edge cases where batch might not have both classes
         num_real = real_images.size(0)
@@ -120,6 +133,13 @@ class DeepfakeGAN(pl.LightningModule):
             real_labels = torch.ones(num_real, 1, device=self.device)
             real_outputs = self.discriminator(real_images)
             loss_real = self.criterion(real_outputs, real_labels)
+            
+            # ===== DIAGNOSTIC: Check real outputs =====
+            if batch_idx < 3:
+                print(f"[DIAG batch={batch_idx}] Discriminator on REAL:")
+                print(f"  real_outputs: min={real_outputs.min():.3f}, max={real_outputs.max():.3f}")
+                print(f"  loss_real={loss_real.item():.4f}, has_nan={torch.isnan(loss_real)}")
+            
             with torch.no_grad():
                 d_acc_real = ((real_outputs > 0).float() == real_labels).float().mean()
         
@@ -128,15 +148,36 @@ class DeepfakeGAN(pl.LightningModule):
             fake_labels = torch.zeros(num_fake, 1, device=self.device)
             fake_outputs = self.discriminator(fake_images)
             loss_fake = self.criterion(fake_outputs, fake_labels)
+            
+            # ===== DIAGNOSTIC: Check fake outputs =====
+            if batch_idx < 3:
+                print(f"[DIAG batch={batch_idx}] Discriminator on FAKE:")
+                print(f"  fake_outputs: min={fake_outputs.min():.3f}, max={fake_outputs.max():.3f}")
+                print(f"  loss_fake={loss_fake.item():.4f}, has_nan={torch.isnan(loss_fake)}")
+            
             with torch.no_grad():
                 d_acc_fake = ((fake_outputs > 0).float() == fake_labels).float().mean()
         
         # 3. Generate adversarial images from real images
         if num_real > 0:
-            adv_images, _ = self.generator(real_images)
+            adv_images, perturbation = self.generator(real_images)
+            
+            # ===== DIAGNOSTIC: Check generator output =====
+            if batch_idx < 3:
+                print(f"[DIAG batch={batch_idx}] Generator output:")
+                print(f"  adv_images: min={adv_images.min():.3f}, max={adv_images.max():.3f}, mean={adv_images.mean():.3f}")
+                print(f"  perturbation: min={perturbation.min():.3f}, max={perturbation.max():.3f}")
+                print(f"  adv_has_nan={torch.isnan(adv_images).any()}, adv_has_inf={torch.isinf(adv_images).any()}")
+            
             adv_outputs_d = self.discriminator(adv_images.detach())
             adv_real_labels = torch.ones(num_real, 1, device=self.device)
             loss_adv = self.criterion(adv_outputs_d, adv_real_labels)  # Should still classify as real
+            
+            # ===== DIAGNOSTIC: Check adversarial loss =====
+            if batch_idx < 3:
+                print(f"[DIAG batch={batch_idx}] Adv discriminator:")
+                print(f"  adv_outputs_d: min={adv_outputs_d.min():.3f}, max={adv_outputs_d.max():.3f}")
+                print(f"  loss_adv={loss_adv.item():.4f}, has_nan={torch.isnan(loss_adv)}")
         
         # Combined discriminator loss
         d_loss = loss_real + loss_fake + self.hparams.adv_weight * loss_adv
@@ -173,8 +214,17 @@ class DeepfakeGAN(pl.LightningModule):
         self.log('train/loss_fake', loss_fake, on_step=False, on_epoch=True)
         self.log('train/loss_adv', loss_adv, on_step=False, on_epoch=True)
         
+        # ===== DIAGNOSTIC: Final loss check =====
+        total_loss = d_loss + g_loss
+        if batch_idx < 3 or torch.isnan(total_loss) or torch.isinf(total_loss):
+            print(f'[DIAG batch={batch_idx}] FINAL LOSSES:')
+            print(f'  d_loss={d_loss.item():.4f}, g_loss={g_loss.item():.4f}, total={total_loss.item():.4f}')
+            print(f'  components: loss_real={loss_real.item():.4f}, loss_fake={loss_fake.item():.4f}, loss_adv={loss_adv.item():.4f}')
+            if torch.isnan(total_loss):
+                print(f'  [ERROR] NaN detected! Stopping...')
+        
         # Return combined loss for backprop
-        return d_loss + g_loss
+        return total_loss
     
     def validation_step(self, batch, batch_idx):
         """Validation step"""

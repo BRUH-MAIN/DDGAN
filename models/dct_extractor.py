@@ -107,10 +107,19 @@ class DCT2D(nn.Module):
         # Step 2: DCT along columns (left multiply)
         dct_2d = torch.matmul(self.dct_matrix, dct_rows)  # [B, H, W]
         
+        # ===== DIAGNOSTIC: Check for numerical issues before log =====
+        if torch.isnan(dct_2d).any() or torch.isinf(dct_2d).any():
+            print(f"[DCT WARNING] Pre-log: has_nan={torch.isnan(dct_2d).any()}, has_inf={torch.isinf(dct_2d).any()}")
+            print(f"  gray input: min={gray.min():.3f}, max={gray.max():.3f}, mean={gray.mean():.3f}")
+            print(f"  dct_2d: min={dct_2d.min():.3f}, max={dct_2d.max():.3f}, abs_max={dct_2d.abs().max():.3f}")
+        
+        # Clamp extreme values to prevent overflow in fp16
+        dct_2d = torch.clamp(dct_2d, -1e6, 1e6)
+        
         # Apply log scaling to compress dynamic range
         # DCT coefficients have huge range (DC >> AC components)
         # Log scaling makes features more learnable
-        dct_2d = torch.log(torch.abs(dct_2d) + 1e-8)
+        dct_2d = torch.log(torch.abs(dct_2d) + 1e-6)  # Increased epsilon for stability
         
         # Add channel dimension back
         dct_2d = dct_2d.unsqueeze(1)  # [B, 1, H, W]

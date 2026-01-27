@@ -219,8 +219,17 @@ class Generator(nn.Module):
         scaled_perturbation = self.epsilon * perturbation
         adversarial_image = x + scaled_perturbation
         
-        # Clamp to valid pixel range [0, 1]
-        adversarial_image = torch.clamp(adversarial_image, 0, 1)
+        # ===== DIAGNOSTIC: Check if input was normalized (ImageNet) =====
+        # If input is ImageNet-normalized, range is ~[-2.1, 2.6], not [0, 1]
+        # Clamping to [0, 1] would destroy the image!
+        input_min, input_max = x.min().item(), x.max().item()
+        if input_min < -0.5 or input_max > 1.5:
+            # Input appears to be normalized - use appropriate clamp range
+            # ImageNet normalized range approximately: [-2.12, 2.64]
+            adversarial_image = torch.clamp(adversarial_image, -3.0, 3.0)
+        else:
+            # Input is in [0, 1] range - use standard clamp
+            adversarial_image = torch.clamp(adversarial_image, 0, 1)
         
         return adversarial_image, perturbation
 

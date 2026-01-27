@@ -1,27 +1,93 @@
 """
 Push CelebDF-v2 processed dataset to HuggingFace Hub
+
+Properly handles:
+- part_* storage shards (collapsed, not treated as splits)
+- Explicit ClassLabel schema
+- Parquet-backed, streamable dataset
+- Production-grade sharding
 """
 import os
 from pathlib import Path
 from dotenv import load_dotenv
-from huggingface_hub import HfApi, create_repo, upload_folder
+from datasets import Dataset, DatasetDict, Image, ClassLabel
+from huggingface_hub import HfApi
 from tqdm import tqdm
 
 
+# Dataset configuration
+LABEL_NAMES = ["real", "fake"]
+LABEL_MAP = {name: i for i, name in enumerate(LABEL_NAMES)}
+LABEL_FEATURE = ClassLabel(names=LABEL_NAMES)
+
+
+def build_split(root_dir: Path, split: str) -> Dataset:
+    """
+    Build a dataset split, correctly handling part_* subdirectories.
+    
+    Args:
+        root_dir: Root dataset directory
+        split: 'train' or 'test'
+    
+    Returns:
+        HuggingFace Dataset with proper schema
+    """
+    images = []
+    labels = []
+    
+    split_dir = root_dir / split
+    if not split_dir.exists():
+        raise FileNotFoundError(f"Missing split directory: {split_dir}")
+    
+    for cls in LABEL_NAMES:
+        cls_dir = split_dir / cls
+        if not cls_dir.exists():
+            raise FileNotFoundError(f"Missing class directory: {cls_dir}")
+        
+        # Check if there are part_* subdirectories or direct images
+        part_dirs = sorted([d for d in cls_dir.iterdir() if d.is_dir() and d.name.startswith('part_')])
+        
+        if part_dirs:
+            # Has part_* subdirectories - iterate through them
+            for part_dir in tqdm(part_dirs, desc=f"  {split}/{cls}"):
+                for img in sorted(part_dir.glob("*.jpg")):
+                    images.append(str(img))
+                    labels.append(LABEL_MAP[cls])
+        else:
+            # No part_* subdirectories - get images directly
+            for img in tqdm(sorted(cls_dir.glob("*.jpg")), desc=f"  {split}/{cls}"):
+                images.append(str(img))
+                labels.append(LABEL_MAP[cls])
+    
+    # Create dataset with proper schema
+    dataset = Dataset.from_dict({
+        "image": images,
+        "label": labels,
+    }).cast_column("image", Image()).cast_column("label", LABEL_FEATURE)
+    
+    return dataset
+
+
 def push_dataset_to_hf(
-    dataset_dir='celebdfv2_images',
-    repo_name='celebdfv2_224',
-    username='RohanRamesh',
-    private=False
+    dataset_dir: str = 'celebdfv2_images_reorganized',
+    repo_name: str = 'celebdfv2_224',
+    username: str = 'RohanRamesh',
+    private: bool = False,
+    train_shards: int = 20,
+    test_shards: int = 5,
+    verify: bool = True
 ):
     """
-    Push dataset to HuggingFace Hub
+    Build and push dataset to HuggingFace Hub with proper schema.
     
     Args:
         dataset_dir: Local directory containing the dataset
         repo_name: Name of the HuggingFace repository
         username: HuggingFace username
         private: Whether to make the repo private
+        train_shards: Number of Parquet shards for train split
+        test_shards: Number of Parquet shards for test split
+        verify: Whether to verify the upload by streaming
     """
     # Load environment variables
     load_dotenv()
@@ -36,185 +102,106 @@ def push_dataset_to_hf(
     print(f"Dataset directory: {dataset_dir}")
     print(f"Repository: {username}/{repo_name}")
     print(f"Private: {private}")
+    print(f"Train shards: {train_shards}")
+    print(f"Test shards: {test_shards}")
     print("=" * 60 + "\n")
     
     # Check if dataset directory exists
-    dataset_path = Path(dataset_dir)
-    if not dataset_path.exists():
+    root_dir = Path(dataset_dir)
+    if not root_dir.exists():
         raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
     
-    # Count files
-    print("Scanning dataset...")
-    train_real = len(list((dataset_path / 'train' / 'real').glob('*.jpg')))
-    train_fake = len(list((dataset_path / 'train' / 'fake').glob('*.jpg')))
-    test_real = len(list((dataset_path / 'test' / 'real').glob('*.jpg')))
-    test_fake = len(list((dataset_path / 'test' / 'fake').glob('*.jpg')))
+    # Build dataset splits
+    print("Building dataset splits...")
+    print("(This correctly handles part_* subdirectories)\n")
     
-    total_files = train_real + train_fake + test_real + test_fake
+    print("Building train split...")
+    train_dataset = build_split(root_dir, "train")
+    print(f"  ✓ Train: {len(train_dataset):,} images\n")
     
-    print(f"\nDataset statistics:")
-    print(f"  Train:")
-    print(f"    Real: {train_real:,} images")
-    print(f"    Fake: {train_fake:,} images")
-    print(f"    Total: {train_real + train_fake:,} images")
-    print(f"  Test:")
-    print(f"    Real: {test_real:,} images")
-    print(f"    Fake: {test_fake:,} images")
-    print(f"    Total: {test_real + test_fake:,} images")
-    print(f"  Total: {total_files:,} images\n")
+    print("Building test split...")
+    test_dataset = build_split(root_dir, "test")
+    print(f"  ✓ Test: {len(test_dataset):,} images\n")
     
-    # Initialize HuggingFace API
-    api = HfApi(token=hf_token)
+    # Create DatasetDict
+    dataset = DatasetDict({
+        "train": train_dataset,
+        "test": test_dataset,
+    })
     
-    # Create repository
+    # Print dataset info
+    print("Dataset schema:")
+    print(f"  {dataset}")
+    print(f"  Features: {dataset['train'].features}\n")
+    
+    # Print class distribution
+    train_labels = train_dataset['label']
+    test_labels = test_dataset['label']
+    
+    train_real = sum(1 for l in train_labels if l == 0)
+    train_fake = sum(1 for l in train_labels if l == 1)
+    test_real = sum(1 for l in test_labels if l == 0)
+    test_fake = sum(1 for l in test_labels if l == 1)
+    
+    print("Class distribution:")
+    print(f"  Train: real={train_real:,}, fake={train_fake:,}")
+    print(f"  Test:  real={test_real:,}, fake={test_fake:,}")
+    print(f"  Total: {len(train_dataset) + len(test_dataset):,} images\n")
+    
+    # Push to Hub
     repo_id = f"{username}/{repo_name}"
-    print(f"Creating repository: {repo_id}...")
+    print(f"Pushing to HuggingFace Hub: {repo_id}")
+    print("(This creates proper Parquet shards for streaming)\n")
     
     try:
-        create_repo(
-            repo_id=repo_id,
+        dataset.push_to_hub(
+            repo_id,
             token=hf_token,
             private=private,
-            repo_type="dataset",
-            exist_ok=True
+            num_shards={"train": train_shards, "test": test_shards}
         )
-        print(f"✓ Repository created/found: https://huggingface.co/datasets/{repo_id}\n")
-    except Exception as e:
-        print(f"Error creating repository: {e}")
-        return
-    
-    # Create README
-    print("Creating README.md...")
-    readme_content = f"""---
-license: cc-by-nc-4.0
-task_categories:
-- image-classification
-- zero-shot-image-classification
-tags:
-- deepfake-detection
-- face
-- synthetic
-size_categories:
-- 100K<n<1M
----
-
-# CelebDF-v2 224x224 Processed Dataset
-
-This dataset contains preprocessed images from the CelebDF-v2 dataset, resized and face-cropped to 224×224 pixels.
-
-## Dataset Description
-
-- **Task**: Deepfake detection
-- **Format**: RGB images, 224×224 pixels
-- **Classes**: Real (0) and Fake (1)
-- **Total Images**: {total_files:,}
-
-## Dataset Structure
-
-```
-celebdfv2_224/
-├── train/
-│   ├── real/  ({train_real:,} images)
-│   └── fake/  ({train_fake:,} images)
-└── test/
-    ├── real/  ({test_real:,} images)
-    └── fake/  ({test_fake:,} images)
-```
-
-## Statistics
-
-| Split | Real | Fake | Total |
-|-------|------|------|-------|
-| Train | {train_real:,} | {train_fake:,} | {train_real + train_fake:,} |
-| Test  | {test_real:,} | {test_fake:,} | {test_real + test_fake:,} |
-| **Total** | **{train_real + test_real:,}** | **{train_fake + test_fake:,}** | **{total_files:,}** |
-
-## Preprocessing
-
-The original CelebDF-v2 videos were processed using:
-1. MTCNN face detection
-2. Face cropping with 30% margin
-3. Resizing to 224×224 pixels
-4. Frame extraction (30 frames per video)
-
-## Usage
-
-```python
-from datasets import load_dataset
-
-# Load the dataset
-dataset = load_dataset("{repo_id}")
-
-# Access splits
-train_dataset = dataset['train']
-test_dataset = dataset['test']
-```
-
-## Source
-
-Original dataset: [CelebDF-v2](https://github.com/yuezunli/celeb-deepfakeforensics)
-
-## License
-
-This dataset follows the same license as the original CelebDF-v2 dataset (CC BY-NC 4.0).
-
-## Citation
-
-If you use this dataset, please cite the original CelebDF-v2 paper:
-
-```bibtex
-@inproceedings{{li2020celeb,
-  title={{Celeb-DF: A Large-scale Challenging Dataset for DeepFake Forensics}},
-  author={{Li, Yuezun and Yang, Xin and Sun, Pu and Qi, Honggang and Lyu, Siwei}},
-  booktitle={{IEEE Conference on Computer Vision and Pattern Recognition (CVPR)}},
-  year={{2020}}
-}}
-```
-
-## Processed by
-
-Dataset preprocessed by RohanRamesh for deepfake detection research.
-
----
-
-**Note**: This dataset is for research purposes only. Use responsibly and ethically.
-"""
-    
-    readme_path = dataset_path / 'README.md'
-    readme_path.write_text(readme_content)
-    print(f"✓ README.md created\n")
-    
-    # Upload dataset
-    print(f"Uploading dataset to {repo_id}...")
-    print("This may take a while depending on your internet connection...")
-    print("Using large folder upload for better reliability...\n")
-    
-    try:
-        api.upload_large_folder(
-            folder_path=dataset_dir,
-            repo_id=repo_id,
-            repo_type="dataset",
-            allow_patterns=["*.jpg", "*.jpeg", "*.png", "*.txt", "*.md"],
-            ignore_patterns=[".git/*", "__pycache__/*", "*.pyc"],
-            num_workers=4
-        )
-        print(f"\n✓ Dataset uploaded successfully!")
-        print(f"\n{'=' * 60}")
-        print(f"Dataset available at:")
-        print(f"https://huggingface.co/datasets/{repo_id}")
-        print(f"{'=' * 60}\n")
+        print(f"\n✓ Dataset pushed successfully!")
+        print(f"  URL: https://huggingface.co/datasets/{repo_id}\n")
         
     except Exception as e:
-        print(f"\n✗ Error uploading dataset: {e}")
-        print("\nYou can try uploading manually using:")
-        print(f"  huggingface-cli upload {repo_id} {dataset_dir} --repo-type dataset")
+        print(f"\n✗ Error pushing dataset: {e}")
+        raise
+    
+    # Verification step
+    if verify:
+        print("=" * 60)
+        print("VERIFICATION (streaming mode)")
+        print("=" * 60)
+        
+        try:
+            from datasets import load_dataset as load_ds
+            
+            print(f"Loading {repo_id} in streaming mode...")
+            ds = load_ds(repo_id, streaming=True)
+            
+            # Get first sample from each split
+            train_sample = next(iter(ds["train"]))
+            test_sample = next(iter(ds["test"]))
+            
+            print(f"\n✓ Streaming verification passed!")
+            print(f"  Train sample: image={type(train_sample['image'])}, label={train_sample['label']}")
+            print(f"  Test sample: image={type(test_sample['image'])}, label={test_sample['label']}")
+            print(f"\nDataset is production-ready and streamable!")
+            
+        except Exception as e:
+            print(f"\n⚠ Verification failed: {e}")
+            print("Dataset was pushed but may not be streamable.")
+    
+    print("\n" + "=" * 60)
+    print("DONE")
+    print("=" * 60 + "\n")
 
 
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description='Push CelebDF-v2 dataset to HuggingFace')
-    parser.add_argument('--dataset-dir', type=str, default='celebdfv2_images',
+    parser = argparse.ArgumentParser(description='Push CelebDF-v2 dataset to HuggingFace (proper Parquet format)')
+    parser.add_argument('--dataset-dir', type=str, default='celebdfv2_images_reorganized',
                         help='Path to dataset directory')
     parser.add_argument('--repo-name', type=str, default='celebdfv2_224',
                         help='Name of HuggingFace repository')
@@ -222,6 +209,12 @@ if __name__ == "__main__":
                         help='HuggingFace username')
     parser.add_argument('--private', action='store_true',
                         help='Make repository private')
+    parser.add_argument('--train-shards', type=int, default=20,
+                        help='Number of Parquet shards for train split')
+    parser.add_argument('--test-shards', type=int, default=5,
+                        help='Number of Parquet shards for test split')
+    parser.add_argument('--no-verify', action='store_true',
+                        help='Skip verification step')
     
     args = parser.parse_args()
     
@@ -229,5 +222,8 @@ if __name__ == "__main__":
         dataset_dir=args.dataset_dir,
         repo_name=args.repo_name,
         username=args.username,
-        private=args.private
+        private=args.private,
+        train_shards=args.train_shards,
+        test_shards=args.test_shards,
+        verify=not args.no_verify
     )

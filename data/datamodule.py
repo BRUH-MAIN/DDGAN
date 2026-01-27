@@ -207,12 +207,10 @@ class DeepfakeDataModule(pl.LightningDataModule):
                 print(f"Loading dataset from HuggingFace: {self.hf_dataset_id}")
                 
                 # Load train and validation/test splits separately for faster loading
-                # Using trust_remote_code=True and keeping data on disk
                 print("  Loading train split...")
                 train_data = load_dataset(
                     self.hf_dataset_id, 
-                    split='train',
-                    trust_remote_code=True
+                    split='train'
                 )
                 
                 # Try to find validation split
@@ -220,8 +218,7 @@ class DeepfakeDataModule(pl.LightningDataModule):
                 print(f"  Loading {val_split_name} split...")
                 val_data = load_dataset(
                     self.hf_dataset_id,
-                    split=val_split_name,
-                    trust_remote_code=True
+                    split=val_split_name
                 )
                 
                 print(f"  Train samples: {len(train_data)}")

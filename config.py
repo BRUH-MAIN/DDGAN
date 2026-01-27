@@ -45,7 +45,7 @@ class TrainingConfig:
     """Training configuration"""
     # Training parameters
     max_epochs: int = 50
-    learning_rate: float = 2e-4
+    learning_rate: float = 1e-4  # Reduced from 2e-4 for stability
     betas: tuple = (0.5, 0.999)
     weight_decay: float = 0.01
     
@@ -55,7 +55,7 @@ class TrainingConfig:
     
     # Optimization
     gradient_clip_val: float = 1.0
-    precision: str = '16-mixed'
+    precision: str = '32-true'  # Use fp32 for debugging NaN issues (change back to '16-mixed' after)
     
     # Scheduler
     scheduler_type: str = 'cosine'
