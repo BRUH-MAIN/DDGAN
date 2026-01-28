@@ -118,13 +118,13 @@ class DeepfakeGAN(pl.LightningModule):
         num_real = real_images.size(0)
         num_fake = fake_images.size(0)
         
-        # Initialize losses
-        loss_real = torch.tensor(0.0, device=self.device)
-        loss_fake = torch.tensor(0.0, device=self.device)
-        loss_adv = torch.tensor(0.0, device=self.device)
-        g_loss = torch.tensor(0.0, device=self.device)
-        g_loss_adv = torch.tensor(0.0, device=self.device)
-        g_loss_perturb = torch.tensor(0.0, device=self.device)
+        # Initialize losses (with requires_grad=True for backward compatibility)
+        loss_real = torch.tensor(0.0, device=self.device, requires_grad=True)
+        loss_fake = torch.tensor(0.0, device=self.device, requires_grad=True)
+        loss_adv = torch.tensor(0.0, device=self.device, requires_grad=True)
+        g_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        g_loss_adv = torch.tensor(0.0, device=self.device, requires_grad=True)
+        g_loss_perturb = torch.tensor(0.0, device=self.device, requires_grad=True)
         d_acc_real = torch.tensor(0.5, device=self.device)
         d_acc_fake = torch.tensor(0.5, device=self.device)
         g_acc_adv = torch.tensor(0.0, device=self.device)
@@ -191,10 +191,11 @@ class DeepfakeGAN(pl.LightningModule):
             with torch.no_grad():
                 g_acc_adv = ((adv_outputs_g > 0).float() == adv_fake_labels).float().mean()
         
-        # Step 2: Update Generator
+        # Step 2: Update Generator (only if we have real images to generate adversarial samples)
         g_opt.zero_grad()
-        self.manual_backward(g_loss)
-        self.clip_gradients(g_opt, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
+        if num_real > 0:
+            self.manual_backward(g_loss)
+            self.clip_gradients(g_opt, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
         g_opt.step()
         
         # Log metrics
