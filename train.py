@@ -4,13 +4,48 @@ Main training script for Deepfake Detection GAN
 import os
 import torch
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping, RichProgressBar
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import TensorBoardLogger
 import argparse
 
 from config import default_config
 from data import DeepfakeDataModule
 from lightning_module import DeepfakeGAN
+
+
+class CleanProgressBar(TQDMProgressBar):
+    """Custom progress bar that shows one bar per epoch with live metrics"""
+    
+    def __init__(self, refresh_rate: int = 1):
+        super().__init__(refresh_rate=refresh_rate)
+    
+    def init_train_tqdm(self):
+        """Override to configure the main training progress bar"""
+        bar = super().init_train_tqdm()
+        bar.dynamic_ncols = True
+        bar.leave = True
+        return bar
+    
+    def init_validation_tqdm(self):
+        """Override to configure validation progress bar"""
+        bar = super().init_validation_tqdm()
+        bar.dynamic_ncols = True
+        bar.leave = False  # Don't leave validation bar after completion
+        return bar
+    
+    def on_train_epoch_start(self, trainer, pl_module):
+        """Reset and configure bar at epoch start"""
+        super().on_train_epoch_start(trainer, pl_module)
+        # Update description with epoch number
+        if self.train_progress_bar is not None:
+            self.train_progress_bar.set_description(f"Epoch {trainer.current_epoch}")
+    
+    def get_metrics(self, trainer, pl_module):
+        """Get metrics to display in progress bar"""
+        items = super().get_metrics(trainer, pl_module)
+        # Remove 'v_num' as it clutters the display
+        items.pop("v_num", None)
+        return items
 
 
 def main(args):
@@ -70,8 +105,8 @@ def main(args):
     # Setup callbacks
     print("\nSetting up callbacks...")
     
-    # Progress bar callback
-    progress_bar = RichProgressBar(refresh_rate=default_config.training.refresh_rate)
+    # Progress bar callback - single bar per epoch with live metric updates
+    progress_bar = CleanProgressBar(refresh_rate=default_config.training.refresh_rate)
     
     # Model checkpoint callback
     checkpoint_callback = ModelCheckpoint(
