@@ -21,16 +21,29 @@ class CleanProgressBar(TQDMProgressBar):
     
     def init_train_tqdm(self):
         """Override to configure the main training progress bar"""
-        bar = super().init_train_tqdm()
-        bar.dynamic_ncols = True
-        bar.leave = True
+        from tqdm import tqdm
+        bar = tqdm(
+            desc="Training",
+            position=0,
+            disable=self.is_disabled,
+            leave=True,
+            dynamic_ncols=True,
+            file=self._stdout,
+            smoothing=0,
+        )
         return bar
     
     def init_validation_tqdm(self):
         """Override to configure validation progress bar"""
-        bar = super().init_validation_tqdm()
-        bar.dynamic_ncols = True
-        bar.leave = False  # Don't leave validation bar after completion
+        from tqdm import tqdm
+        bar = tqdm(
+            desc="Validating",
+            position=0,
+            disable=self.is_disabled,
+            leave=False,  # Don't leave validation bar after completion
+            dynamic_ncols=True,
+            file=self._stdout,
+        )
         return bar
     
     def on_train_epoch_start(self, trainer, pl_module):
@@ -38,7 +51,7 @@ class CleanProgressBar(TQDMProgressBar):
         super().on_train_epoch_start(trainer, pl_module)
         # Update description with epoch number
         if self.train_progress_bar is not None:
-            self.train_progress_bar.set_description(f"Epoch {trainer.current_epoch}")
+            self.train_progress_bar.set_description(f"Epoch {trainer.current_epoch}/{trainer.max_epochs-1}")
     
     def get_metrics(self, trainer, pl_module):
         """Get metrics to display in progress bar"""
