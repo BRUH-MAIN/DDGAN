@@ -103,6 +103,8 @@ def main(args):
     
     # Initialize trainer
     print("\nInitializing Trainer...")
+    # Note: gradient_clip_val removed - incompatible with manual optimization
+    # Gradient clipping is handled in lightning_module.py via self.clip_gradients()
     trainer = pl.Trainer(
         max_epochs=default_config.training.max_epochs,
         accelerator=default_config.training.accelerator,
@@ -113,7 +115,6 @@ def main(args):
         logger=logger,
         log_every_n_steps=default_config.training.log_every_n_steps,
         val_check_interval=default_config.training.val_check_interval,
-        gradient_clip_val=default_config.training.gradient_clip_val,
         deterministic=False,  # Set to False to allow benchmark optimization
         benchmark=True,  # Enable cudnn benchmarking for faster training
         enable_progress_bar=default_config.training.refresh_rate > 0,
@@ -127,7 +128,7 @@ def main(args):
     print(f"  Accelerator: {trainer.accelerator}")
     print(f"  Devices: {trainer.num_devices}")
     print(f"  Strategy: {trainer.strategy.__class__.__name__}")
-    print(f"  Gradient clipping: {trainer.gradient_clip_val}")
+    print(f"  Gradient clipping: 1.0 (manual, in lightning_module)")
     
     # Start training
     print("\n" + "=" * 60)
