@@ -192,11 +192,12 @@ class DeepfakeGAN(pl.LightningModule):
                 g_acc_adv = ((adv_outputs_g > 0).float() == adv_fake_labels).float().mean()
         
         # Step 2: Update Generator (only if we have real images to generate adversarial samples)
-        g_opt.zero_grad()
+        # Must include backward AND step together for AMP scaler compatibility
         if num_real > 0:
+            g_opt.zero_grad()
             self.manual_backward(g_loss)
             self.clip_gradients(g_opt, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
-        g_opt.step()
+            g_opt.step()
         
         # Log metrics
         self.log('train/d_loss', d_loss, on_step=True, on_epoch=True, prog_bar=True)
