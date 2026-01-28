@@ -70,7 +70,9 @@ class TrainingConfig:
     # Hardware
     accelerator: str = 'gpu'
     devices: int = 2  # Number of GPUs
-    strategy: str = 'ddp'  # Distributed Data Parallel
+    # Use ddp_find_unused_parameters_true for GAN training where D and G
+    # are trained alternately, so not all params are used in each backward pass
+    strategy: str = 'ddp_find_unused_parameters_true'
 
 
 @dataclass
