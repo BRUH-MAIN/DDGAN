@@ -133,11 +133,11 @@ def main(args):
     # Progress bar callback - single bar per epoch with live metric updates
     progress_bar = CleanProgressBar(refresh_rate=default_config.training.refresh_rate)
     
-    # Model checkpoint callback
+    # Model checkpoint callback (monitor AUC, not accuracy - aligned with robustness objective)
     checkpoint_callback = ModelCheckpoint(
         dirpath=default_config.training.checkpoint_dir,
-        filename='{epoch:02d}-{val/accuracy:.4f}',
-        monitor='val/accuracy',
+        filename='{epoch:02d}-{val/auc_clean:.4f}',
+        monitor='val/auc_clean',
         mode='max',
         save_top_k=default_config.training.save_top_k,
         save_last=True,
@@ -147,9 +147,9 @@ def main(args):
     # Learning rate monitor
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     
-    # Early stopping (optional)
+    # Early stopping (monitor AUC, not accuracy - aligned with robustness objective)
     early_stopping = EarlyStopping(
-        monitor='val/accuracy',
+        monitor='val/auc_clean',
         patience=10,
         mode='max',
         verbose=True

@@ -51,8 +51,8 @@ class TrainingConfig:
     
     # Loss weights (adversarial robustness training)
     consistency_weight: float = 1.0  # Weight for consistency loss in discriminator
-    margin: float = 1.0  # Margin for generator margin loss
-    perturb_weight: float = 0.1  # Weight for perturbation regularization
+    margin: float = 0.3  # Margin for generator margin loss (lowered to increase G pressure)
+    perturb_weight: float = 0.02  # Weight for perturbation regularization (lowered to allow stronger attacks)
     
     # Optimization
     gradient_clip_val: float = 1.0

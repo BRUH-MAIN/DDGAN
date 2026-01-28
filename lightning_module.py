@@ -176,7 +176,11 @@ class DeepfakeGAN(pl.LightningModule):
             loss_consistency = self.consistency_loss(real_outputs.detach(), adv_logits)
         
         # Combined discriminator loss
-        d_loss = loss_real + loss_fake + self.hparams.consistency_weight * loss_consistency
+        # Warmup: skip consistency loss for first 3 epochs to let G learn to attack first
+        if self.current_epoch < 3:
+            d_loss = loss_real + loss_fake
+        else:
+            d_loss = loss_real + loss_fake + self.hparams.consistency_weight * loss_consistency
         
         # ===== MANUAL OPTIMIZATION =====
         # Get optimizers
