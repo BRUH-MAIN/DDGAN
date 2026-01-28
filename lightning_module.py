@@ -156,20 +156,33 @@ class DeepfakeGAN(pl.LightningModule):
         # Combined discriminator loss
         d_loss = loss_real + loss_fake + self.hparams.adv_weight * loss_adv
         
+        # ===== MANUAL OPTIMIZATION =====
+        # Get optimizers
+        d_opt, g_opt = self.optimizers()
+        
+        # Step 1: Update Discriminator FIRST (before computing g_loss)
+        # This avoids the inplace modification error
+        d_opt.zero_grad()
+        self.manual_backward(d_loss)
+        self.clip_gradients(d_opt, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
+        d_opt.step()
+        
         # ===== TRAIN GENERATOR =====
+        # Generate fresh adversarial images AFTER discriminator update
+        # This creates a new computation graph with updated discriminator weights
         if num_real > 0:
-            # Generate adversarial images
-            adv_images, perturbation = self.generator(real_images)
+            # Generate adversarial images (fresh forward pass)
+            adv_images_g, perturbation_g = self.generator(real_images)
             
             # Forward through discriminator (no detach!)
-            adv_outputs_g = self.discriminator(adv_images)
+            adv_outputs_g = self.discriminator(adv_images_g)
             
             # Adversarial loss (fool discriminator)
             adv_fake_labels = torch.zeros(num_real, 1, device=self.device)
             g_loss_adv = self.criterion(adv_outputs_g, adv_fake_labels)  # Want D to classify as fake
             
             # Perturbation regularization (L1 norm)
-            g_loss_perturb = torch.mean(torch.abs(perturbation))
+            g_loss_perturb = torch.mean(torch.abs(perturbation_g))
             
             # Combined generator loss
             g_loss = g_loss_adv + self.hparams.perturb_weight * g_loss_perturb
@@ -177,6 +190,12 @@ class DeepfakeGAN(pl.LightningModule):
             # Generator accuracy
             with torch.no_grad():
                 g_acc_adv = ((adv_outputs_g > 0).float() == adv_fake_labels).float().mean()
+        
+        # Step 2: Update Generator
+        g_opt.zero_grad()
+        self.manual_backward(g_loss)
+        self.clip_gradients(g_opt, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
+        g_opt.step()
         
         # Log metrics
         self.log('train/d_loss', d_loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -187,22 +206,6 @@ class DeepfakeGAN(pl.LightningModule):
         self.log('train/loss_real', loss_real, on_step=False, on_epoch=True)
         self.log('train/loss_fake', loss_fake, on_step=False, on_epoch=True)
         self.log('train/loss_adv', loss_adv, on_step=False, on_epoch=True)
-        
-        # ===== MANUAL OPTIMIZATION =====
-        # Get optimizers
-        d_opt, g_opt = self.optimizers()
-        
-        # Step 1: Update Discriminator
-        d_opt.zero_grad()
-        self.manual_backward(d_loss)
-        self.clip_gradients(d_opt, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
-        d_opt.step()
-        
-        # Step 2: Update Generator
-        g_opt.zero_grad()
-        self.manual_backward(g_loss)
-        self.clip_gradients(g_opt, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
-        g_opt.step()
         
         # NaN check
         if torch.isnan(d_loss) or torch.isnan(g_loss):
