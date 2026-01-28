@@ -39,7 +39,8 @@ class DeepfakeGAN(pl.LightningModule):
         lr=2e-4,
         betas=(0.5, 0.999),
         weight_decay=0.01,
-        adv_weight=0.5,
+        consistency_weight=1.0,  # Weight for consistency loss in discriminator
+        margin=1.0,  # Margin for generator margin loss
         perturb_weight=0.1,
         scheduler_type='cosine',
         max_epochs=50
@@ -55,7 +56,8 @@ class DeepfakeGAN(pl.LightningModule):
             lr: Learning rate
             betas: Adam beta parameters
             weight_decay: Weight decay for AdamW
-            adv_weight: Weight for adversarial loss in discriminator
+            consistency_weight: Weight for consistency loss (prediction drift penalty)
+            margin: Margin for generator margin loss
             perturb_weight: Weight for perturbation regularization
             scheduler_type: Learning rate scheduler type
             max_epochs: Maximum training epochs
@@ -90,6 +92,24 @@ class DeepfakeGAN(pl.LightningModule):
         """Forward pass through discriminator"""
         return self.discriminator(x)
     
+    def consistency_loss(self, logits_clean, logits_adv):
+        """
+        Penalize prediction drift between clean and adversarial inputs.
+        Operates in probability space to preserve ranking.
+        """
+        p_clean = torch.sigmoid(logits_clean)
+        p_adv = torch.sigmoid(logits_adv)
+        return torch.mean((p_clean - p_adv) ** 2)
+
+    def generator_margin_loss(self, logits, labels, margin=1.0):
+        """
+        Margin-based adversarial loss.
+        Encourages confidence reduction without forcing label flip.
+        labels: 1 for real, 0 for fake
+        """
+        signed_logits = (2 * labels - 1) * logits
+        return torch.mean(F.relu(margin - signed_logits))
+    
     def training_step(self, batch, batch_idx):
         """
         Training step following the adversarial robustness strategy
@@ -121,13 +141,13 @@ class DeepfakeGAN(pl.LightningModule):
         # Initialize losses (with requires_grad=True for backward compatibility)
         loss_real = torch.tensor(0.0, device=self.device, requires_grad=True)
         loss_fake = torch.tensor(0.0, device=self.device, requires_grad=True)
-        loss_adv = torch.tensor(0.0, device=self.device, requires_grad=True)
+        loss_consistency = torch.tensor(0.0, device=self.device, requires_grad=True)
         g_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
-        g_loss_adv = torch.tensor(0.0, device=self.device, requires_grad=True)
+        g_loss_margin = torch.tensor(0.0, device=self.device, requires_grad=True)
         g_loss_perturb = torch.tensor(0.0, device=self.device, requires_grad=True)
         d_acc_real = torch.tensor(0.5, device=self.device)
         d_acc_fake = torch.tensor(0.5, device=self.device)
-        g_acc_adv = torch.tensor(0.0, device=self.device)
+        g_acc_adv = torch.tensor(0.5, device=self.device)  # Mean confidence on adversarial images
         
         # ===== TRAIN DISCRIMINATOR =====
         # 1. Forward real images
@@ -146,15 +166,17 @@ class DeepfakeGAN(pl.LightningModule):
             with torch.no_grad():
                 d_acc_fake = ((fake_outputs > 0).float() == fake_labels).float().mean()
         
-        # 3. Generate adversarial images from real images
+        # 3. Generate adversarial images from real images and compute consistency loss
+        loss_consistency = torch.tensor(0.0, device=self.device, requires_grad=True)
         if num_real > 0:
             adv_images, perturbation = self.generator(real_images)
-            adv_outputs_d = self.discriminator(adv_images.detach())
-            adv_real_labels = torch.ones(num_real, 1, device=self.device)
-            loss_adv = self.criterion(adv_outputs_d, adv_real_labels)  # Should still classify as real
+            adv_logits = self.discriminator(adv_images.detach())
+            
+            # Consistency loss: penalize prediction drift (NOT BCE on adversarial labels)
+            loss_consistency = self.consistency_loss(real_outputs.detach(), adv_logits)
         
         # Combined discriminator loss
-        d_loss = loss_real + loss_fake + self.hparams.adv_weight * loss_adv
+        d_loss = loss_real + loss_fake + self.hparams.consistency_weight * loss_consistency
         
         # ===== MANUAL OPTIMIZATION =====
         # Get optimizers
@@ -170,26 +192,31 @@ class DeepfakeGAN(pl.LightningModule):
         # ===== TRAIN GENERATOR =====
         # Generate fresh adversarial images AFTER discriminator update
         # This creates a new computation graph with updated discriminator weights
+        g_loss_margin = torch.tensor(0.0, device=self.device, requires_grad=True)
         if num_real > 0:
             # Generate adversarial images (fresh forward pass)
             adv_images_g, perturbation_g = self.generator(real_images)
             
             # Forward through discriminator (no detach!)
-            adv_outputs_g = self.discriminator(adv_images_g)
+            adv_logits_g = self.discriminator(adv_images_g)
             
-            # Adversarial loss (fool discriminator)
-            adv_fake_labels = torch.zeros(num_real, 1, device=self.device)
-            g_loss_adv = self.criterion(adv_outputs_g, adv_fake_labels)  # Want D to classify as fake
+            # Margin-based loss (reduce confidence without forcing label flip)
+            labels_real = torch.ones_like(adv_logits_g)
+            g_loss_margin = self.generator_margin_loss(
+                adv_logits_g,
+                labels_real,
+                margin=self.hparams.margin
+            )
             
             # Perturbation regularization (L1 norm)
             g_loss_perturb = torch.mean(torch.abs(perturbation_g))
             
             # Combined generator loss
-            g_loss = g_loss_adv + self.hparams.perturb_weight * g_loss_perturb
+            g_loss = g_loss_margin + self.hparams.perturb_weight * g_loss_perturb
             
-            # Generator accuracy
+            # Generator effectiveness: how much confidence was reduced
             with torch.no_grad():
-                g_acc_adv = ((adv_outputs_g > 0).float() == adv_fake_labels).float().mean()
+                g_acc_adv = torch.sigmoid(adv_logits_g).mean()  # Lower = more effective
         
         # Step 2: Update Generator (only if we have real images to generate adversarial samples)
         # Must include backward AND step together for AMP scaler compatibility
@@ -204,10 +231,11 @@ class DeepfakeGAN(pl.LightningModule):
         self.log('train/g_loss', g_loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log('train/d_acc_real', d_acc_real, on_step=False, on_epoch=True)
         self.log('train/d_acc_fake', d_acc_fake, on_step=False, on_epoch=True)
-        self.log('train/g_acc_adv', g_acc_adv, on_step=False, on_epoch=True)
+        self.log('train/g_confidence_reduction', g_acc_adv, on_step=False, on_epoch=True)
         self.log('train/loss_real', loss_real, on_step=False, on_epoch=True)
         self.log('train/loss_fake', loss_fake, on_step=False, on_epoch=True)
-        self.log('train/loss_adv', loss_adv, on_step=False, on_epoch=True)
+        self.log('train/loss_consistency', loss_consistency, on_step=True, on_epoch=True)
+        self.log('train/g_loss_margin', g_loss_margin, on_step=True, on_epoch=True)
         
         # NaN check
         if torch.isnan(d_loss) or torch.isnan(g_loss):
@@ -221,68 +249,91 @@ class DeepfakeGAN(pl.LightningModule):
         g_sch.step()
     
     def validation_step(self, batch, batch_idx):
-        """Validation step"""
+        """Validation step with adversarial evaluation"""
         images, labels = batch
         
-        # Forward pass
-        logits = self.discriminator(images)
-        probs = torch.sigmoid(logits)
-        preds = (probs > 0.5).long().squeeze()
+        # Forward pass on clean images
+        logits_clean = self.discriminator(images)
+        probs_clean = torch.sigmoid(logits_clean)
+        preds = (probs_clean > 0.5).long().squeeze()
+        
+        # Adversarial evaluation (NO gradients)
+        with torch.no_grad():
+            adv_images, _ = self.generator(images)
+            logits_adv = self.discriminator(adv_images)
+            probs_adv = torch.sigmoid(logits_adv)
         
         # Store for epoch-level metrics
         self.validation_step_outputs.append({
             'labels': labels.cpu(),
             'preds': preds.cpu(),
-            'probs': probs.cpu().squeeze()
+            'probs_clean': probs_clean.cpu().squeeze(),
+            'probs_adv': probs_adv.cpu().squeeze()
         })
         
         # Calculate loss
         labels_float = labels.float().unsqueeze(1)
-        loss = self.criterion(logits, labels_float)
+        loss = self.criterion(logits_clean, labels_float)
         
         self.log('val/loss', loss, on_step=False, on_epoch=True, prog_bar=True)
         
         return loss
     
     def on_validation_epoch_end(self):
-        """Calculate and log epoch-level metrics"""
+        """Calculate and log epoch-level metrics including adversarial robustness"""
         # Gather all predictions and labels
         all_labels = []
         all_preds = []
-        all_probs = []
+        all_probs_clean = []
+        all_probs_adv = []
         
         for output in self.validation_step_outputs:
             all_labels.append(output['labels'])
             all_preds.append(output['preds'])
-            all_probs.append(output['probs'])
+            all_probs_clean.append(output['probs_clean'])
+            all_probs_adv.append(output['probs_adv'])
         
         all_labels = torch.cat(all_labels).numpy()
         all_preds = torch.cat(all_preds).numpy()
-        all_probs = torch.cat(all_probs).numpy()
+        all_probs_clean = torch.cat(all_probs_clean).numpy()
+        all_probs_adv = torch.cat(all_probs_adv).numpy()
         
-        # Calculate metrics
+        # Calculate standard metrics (on clean images)
         accuracy = accuracy_score(all_labels, all_preds)
         precision = precision_score(all_labels, all_preds, zero_division=0)
         recall = recall_score(all_labels, all_preds, zero_division=0)
         f1 = f1_score(all_labels, all_preds, zero_division=0)
         
+        # Calculate AUC for clean and adversarial
         try:
-            roc_auc = roc_auc_score(all_labels, all_probs)
+            auc_clean = roc_auc_score(all_labels, all_probs_clean)
         except:
-            roc_auc = 0.0
+            auc_clean = 0.0
+        
+        try:
+            auc_adv = roc_auc_score(all_labels, all_probs_adv)
+        except:
+            auc_adv = 0.0
+        
+        # Robustness gap (lower is better)
+        robustness_gap = auc_clean - auc_adv
         
         # Log metrics
         self.log('val/accuracy', accuracy, on_epoch=True, prog_bar=True)
         self.log('val/precision', precision, on_epoch=True)
         self.log('val/recall', recall, on_epoch=True)
         self.log('val/f1', f1, on_epoch=True)
-        self.log('val/roc_auc', roc_auc, on_epoch=True)
+        self.log('val/auc_clean', auc_clean, on_epoch=True, prog_bar=True)
+        self.log('val/auc_adv', auc_adv, on_epoch=True, prog_bar=True)
+        self.log('val/robustness_gap', robustness_gap, on_epoch=True, prog_bar=True)
         
         # Clear outputs
         self.validation_step_outputs.clear()
         
         print(f"\n[Validation] Acc: {accuracy:.4f} | Prec: {precision:.4f} | "
-              f"Rec: {recall:.4f} | F1: {f1:.4f} | AUC: {roc_auc:.4f}")
+              f"Rec: {recall:.4f} | F1: {f1:.4f}")
+        print(f"[Robustness] AUC_clean: {auc_clean:.4f} | AUC_adv: {auc_adv:.4f} | "
+              f"Gap: {robustness_gap:.4f}")
     
     def configure_optimizers(self):
         """Configure separate optimizers for discriminator and generator"""

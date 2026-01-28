@@ -49,8 +49,9 @@ class TrainingConfig:
     betas: tuple = (0.5, 0.999)
     weight_decay: float = 0.01
     
-    # Loss weights
-    adv_weight: float = 0.5  # Weight for adversarial loss in discriminator
+    # Loss weights (adversarial robustness training)
+    consistency_weight: float = 1.0  # Weight for consistency loss in discriminator
+    margin: float = 1.0  # Margin for generator margin loss
     perturb_weight: float = 0.1  # Weight for perturbation regularization
     
     # Optimization
