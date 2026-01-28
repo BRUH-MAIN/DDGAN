@@ -2,6 +2,7 @@
 Main training script for Deepfake Detection GAN
 """
 import os
+import sys
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping, TQDMProgressBar
@@ -28,7 +29,7 @@ class CleanProgressBar(TQDMProgressBar):
             disable=self.is_disabled,
             leave=True,
             dynamic_ncols=True,
-            file=self._stdout,
+            file=sys.stdout,
             smoothing=0,
         )
         return bar
@@ -42,7 +43,7 @@ class CleanProgressBar(TQDMProgressBar):
             disable=self.is_disabled,
             leave=False,  # Don't leave validation bar after completion
             dynamic_ncols=True,
-            file=self._stdout,
+            file=sys.stdout,
         )
         return bar
     
