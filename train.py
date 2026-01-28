@@ -120,7 +120,8 @@ def main(args):
         lr=default_config.training.learning_rate,
         betas=default_config.training.betas,
         weight_decay=default_config.training.weight_decay,
-        adv_weight=default_config.training.adv_weight,
+        consistency_weight=default_config.training.consistency_weight,
+        margin=default_config.training.margin,
         perturb_weight=default_config.training.perturb_weight,
         scheduler_type=default_config.training.scheduler_type,
         max_epochs=default_config.training.max_epochs
