@@ -55,11 +55,21 @@ class CleanProgressBar(TQDMProgressBar):
             self.train_progress_bar.set_description(f"Epoch {trainer.current_epoch}/{trainer.max_epochs-1}")
     
     def get_metrics(self, trainer, pl_module):
-        """Get metrics to display in progress bar"""
+        """Get metrics to display in progress bar - shortened for Kaggle display"""
         items = super().get_metrics(trainer, pl_module)
         # Remove 'v_num' as it clutters the display
         items.pop("v_num", None)
-        return items
+        
+        # Shorten metric names for better display in Kaggle notebooks
+        shortened = {}
+        for key, value in items.items():
+            # Remove prefixes and suffixes to shorten names
+            short_key = key.replace("train/", "").replace("val/", "v_")
+            short_key = short_key.replace("_step", "").replace("_epoch", "")
+            short_key = short_key.replace("_loss", "L").replace("loss", "L")
+            shortened[short_key] = value
+        
+        return shortened
 
 
 def main(args):
