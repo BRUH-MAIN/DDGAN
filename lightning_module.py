@@ -101,14 +101,14 @@ class DeepfakeGAN(pl.LightningModule):
         p_adv = torch.sigmoid(logits_adv)
         return torch.mean((p_clean - p_adv) ** 2)
 
-    def generator_margin_loss(self, logits, labels, margin=1.0):
+    def generator_confidence_loss(self, logits, labels):
         """
-        Margin-based adversarial loss.
-        Encourages confidence reduction without forcing label flip.
+        Directly reduce absolute discriminator confidence.
+        Harsher than margin loss - actively pushes real logits down.
         labels: 1 for real, 0 for fake
         """
         signed_logits = (2 * labels - 1) * logits
-        return torch.mean(F.relu(margin - signed_logits))
+        return torch.mean(signed_logits)
     
     def training_step(self, batch, batch_idx):
         """
@@ -143,7 +143,7 @@ class DeepfakeGAN(pl.LightningModule):
         loss_fake = torch.tensor(0.0, device=self.device, requires_grad=True)
         loss_consistency = torch.tensor(0.0, device=self.device, requires_grad=True)
         g_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
-        g_loss_margin = torch.tensor(0.0, device=self.device, requires_grad=True)
+        g_loss_confidence = torch.tensor(0.0, device=self.device, requires_grad=True)
         g_loss_perturb = torch.tensor(0.0, device=self.device, requires_grad=True)
         d_acc_real = torch.tensor(0.5, device=self.device)
         d_acc_fake = torch.tensor(0.5, device=self.device)
@@ -196,7 +196,7 @@ class DeepfakeGAN(pl.LightningModule):
         # ===== TRAIN GENERATOR =====
         # Generate fresh adversarial images AFTER discriminator update
         # This creates a new computation graph with updated discriminator weights
-        g_loss_margin = torch.tensor(0.0, device=self.device, requires_grad=True)
+        g_loss_confidence = torch.tensor(0.0, device=self.device, requires_grad=True)
         if num_real > 0:
             # Generate adversarial images (fresh forward pass)
             adv_images_g, perturbation_g = self.generator(real_images)
@@ -204,19 +204,22 @@ class DeepfakeGAN(pl.LightningModule):
             # Forward through discriminator (no detach!)
             adv_logits_g = self.discriminator(adv_images_g)
             
-            # Margin-based loss (reduce confidence without forcing label flip)
+            # Confidence loss (directly reduce discriminator confidence)
             labels_real = torch.ones_like(adv_logits_g)
-            g_loss_margin = self.generator_margin_loss(
+            g_loss_confidence = self.generator_confidence_loss(
                 adv_logits_g,
-                labels_real,
-                margin=self.hparams.margin
+                labels_real
             )
             
             # Perturbation regularization (L1 norm)
             g_loss_perturb = torch.mean(torch.abs(perturbation_g))
             
             # Combined generator loss
-            g_loss = g_loss_margin + self.hparams.perturb_weight * g_loss_perturb
+            # Warmup: no perturb penalty for first 3 epochs to let G discover attack directions
+            if self.current_epoch < 3:
+                g_loss = g_loss_confidence
+            else:
+                g_loss = g_loss_confidence + self.hparams.perturb_weight * g_loss_perturb
             
             # Generator effectiveness: how much confidence was reduced
             with torch.no_grad():
@@ -239,7 +242,7 @@ class DeepfakeGAN(pl.LightningModule):
         self.log('train/loss_real', loss_real, on_step=False, on_epoch=True)
         self.log('train/loss_fake', loss_fake, on_step=False, on_epoch=True)
         self.log('train/loss_consistency', loss_consistency, on_step=True, on_epoch=True)
-        self.log('train/g_loss_margin', g_loss_margin, on_step=True, on_epoch=True)
+        self.log('train/g_loss_confidence', g_loss_confidence, on_step=True, on_epoch=True)
         
         # NaN check
         if torch.isnan(d_loss) or torch.isnan(g_loss):
