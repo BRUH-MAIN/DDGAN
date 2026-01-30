@@ -176,11 +176,9 @@ class DeepfakeGAN(pl.LightningModule):
             loss_consistency = self.consistency_loss(real_outputs.detach(), adv_logits)
         
         # Combined discriminator loss
-        # Warmup: skip consistency loss for first 3 epochs to let G learn to attack first
-        if self.current_epoch < 3:
-            d_loss = loss_real + loss_fake
-        else:
-            d_loss = loss_real + loss_fake + self.hparams.consistency_weight * loss_consistency
+        # Progressive consistency: ramp up gradually over first 5 epochs (recovery slope, not cliff)
+        cons_w = min(1.0, self.current_epoch / 5)
+        d_loss = loss_real + loss_fake + cons_w * self.hparams.consistency_weight * loss_consistency
         
         # ===== MANUAL OPTIMIZATION =====
         # Get optimizers
@@ -214,12 +212,8 @@ class DeepfakeGAN(pl.LightningModule):
             # Perturbation regularization (L1 norm)
             g_loss_perturb = torch.mean(torch.abs(perturbation_g))
             
-            # Combined generator loss
-            # Warmup: no perturb penalty for first 3 epochs to let G discover attack directions
-            if self.current_epoch < 3:
-                g_loss = g_loss_confidence
-            else:
-                g_loss = g_loss_confidence + self.hparams.perturb_weight * g_loss_perturb
+            # Combined generator loss (perturb weight now at 0.02 - balanced constraint)
+            g_loss = g_loss_confidence + self.hparams.perturb_weight * g_loss_perturb
             
             # Generator effectiveness: how much confidence was reduced
             with torch.no_grad():
@@ -344,18 +338,18 @@ class DeepfakeGAN(pl.LightningModule):
     
     def configure_optimizers(self):
         """Configure separate optimizers for discriminator and generator"""
-        # Discriminator optimizer
+        # Discriminator optimizer (lower LR - defensive stance)
         d_optimizer = torch.optim.AdamW(
             self.discriminator.parameters(),
-            lr=self.hparams.lr,
+            lr=2e-5,  # Lower LR to recover under attack
             betas=self.hparams.betas,
             weight_decay=self.hparams.weight_decay
         )
         
-        # Generator optimizer (slightly lower lr for stability)
+        # Generator optimizer (higher LR - let it lead)
         g_optimizer = torch.optim.AdamW(
             self.generator.parameters(),
-            lr=self.hparams.lr * 0.5,  # Generator learns slower
+            lr=5e-5,  # Higher LR to maintain attack pressure
             betas=self.hparams.betas,
             weight_decay=self.hparams.weight_decay
         )
