@@ -8,6 +8,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import TensorBoardLogger
 import argparse
+from pathlib import Path
 
 from config import default_config
 from data import DeepfakeDataModule
@@ -91,10 +92,18 @@ def main(args):
         print(f"Dataset: {default_config.data.dataset_root} (Local)")
     
     print(f"Batch size: {default_config.data.batch_size}")
+    print(f"Num workers: {default_config.data.num_workers}")
+    print(f"Image size: {default_config.data.image_size}")
     print(f"Max epochs: {default_config.training.max_epochs}")
     print(f"Learning rate: {default_config.training.learning_rate}")
+    print(f"Weight decay: {default_config.training.weight_decay}")
+    print(f"Consistency weight: {default_config.training.consistency_weight}")
+    print(f"Margin: {default_config.training.margin}")
+    print(f"Perturb weight: {default_config.training.perturb_weight}")
+    print(f"Epsilon: {default_config.model.epsilon}")
     print(f"Devices: {default_config.training.devices} {default_config.training.accelerator}")
     print(f"Precision: {default_config.training.precision}")
+    print(f"Seed: {default_config.seed}")
     print("=" * 60 + "\n")
     
     # Initialize DataModule
@@ -150,7 +159,7 @@ def main(args):
     # Early stopping (monitor AUC, not accuracy - aligned with robustness objective)
     early_stopping = EarlyStopping(
         monitor='val/auc_clean',
-        patience=10,
+        patience=args.early_stopping_patience,
         mode='max',
         verbose=True
     )
@@ -209,51 +218,162 @@ def main(args):
     print("=" * 60 + "\n")
     
     # Save final model
-    final_model_path = default_config.training.checkpoint_dir / 'final_model.ckpt'
+    checkpoint_dir = Path(default_config.training.checkpoint_dir)
+    final_model_path = checkpoint_dir / 'final_model.ckpt'
     trainer.save_checkpoint(final_model_path)
     print(f"Final model saved to: {final_model_path}\n")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train Deepfake Detection GAN')
-    parser.add_argument('--data-dir', type=str, default='celebdfv2_images',
-                        help='Path to local dataset directory')
-    parser.add_argument('--hf-dataset', type=str, default=None,
-                        help='HuggingFace dataset ID (e.g., RohanRamesh/celebdfv2_224)')
-    parser.add_argument('--batch-size', type=int, default=32,
-                        help='Batch size for training')
-    parser.add_argument('--epochs', type=int, default=50,
-                        help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=2e-4,
-                        help='Learning rate')
-    parser.add_argument('--devices', type=int, default=2,
-                        help='Number of GPUs to use')
-    parser.add_argument('--no-pretrained', action='store_true',
-                        help='Do not use pretrained weights for discriminator')
-    parser.add_argument('--refresh-rate', type=int, default=1,
-                        help='Progress bar refresh rate (updates per second). Set to 0 to disable.')
+    parser = argparse.ArgumentParser(
+        description='Train Deepfake Detection GAN',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    # ==================== Data Configuration ====================
+    data_group = parser.add_argument_group('Data Configuration')
+    data_group.add_argument('--data-dir', type=str, default='celebdfv2_images',
+                            help='Path to local dataset directory')
+    data_group.add_argument('--hf-dataset', type=str, default=None,
+                            help='HuggingFace dataset ID (e.g., RohanRamesh/celebdfv2_224)')
+    data_group.add_argument('--batch-size', type=int, default=32,
+                            help='Batch size for training')
+    data_group.add_argument('--num-workers', type=int, default=4,
+                            help='Number of data loader workers')
+    data_group.add_argument('--no-pin-memory', action='store_true',
+                            help='Disable pinned memory for data loading')
+    data_group.add_argument('--no-persistent-workers', action='store_true',
+                            help='Disable persistent workers for data loading')
+    data_group.add_argument('--image-size', type=int, default=224,
+                            help='Input image size')
+    
+    # ==================== Model Configuration ====================
+    model_group = parser.add_argument_group('Model Configuration')
+    model_group.add_argument('--d-backbone', type=str, default='convnext_tiny',
+                             choices=['convnext_tiny', 'convnext_small', 'convnext_base'],
+                             help='Discriminator backbone architecture')
+    model_group.add_argument('--no-pretrained', action='store_true',
+                             help='Do not use pretrained weights for discriminator')
+    model_group.add_argument('--g-base-channels', type=int, default=64,
+                             help='Generator base channels')
+    model_group.add_argument('--epsilon', type=float, default=0.03,
+                             help='Maximum perturbation magnitude for generator')
+    
+    # ==================== Training Configuration ====================
+    train_group = parser.add_argument_group('Training Configuration')
+    train_group.add_argument('--epochs', type=int, default=50,
+                             help='Number of training epochs')
+    train_group.add_argument('--lr', type=float, default=1e-4,
+                             help='Learning rate')
+    train_group.add_argument('--beta1', type=float, default=0.5,
+                             help='Adam beta1 parameter')
+    train_group.add_argument('--beta2', type=float, default=0.999,
+                             help='Adam beta2 parameter')
+    train_group.add_argument('--weight-decay', type=float, default=0.01,
+                             help='Weight decay for AdamW optimizer')
+    
+    # ==================== Loss Configuration ====================
+    loss_group = parser.add_argument_group('Loss Configuration')
+    loss_group.add_argument('--consistency-weight', type=float, default=1.0,
+                            help='Weight for consistency loss in discriminator')
+    loss_group.add_argument('--margin', type=float, default=0.3,
+                            help='Margin for generator margin loss')
+    loss_group.add_argument('--perturb-weight', type=float, default=0.005,
+                            help='Weight for perturbation regularization')
+    
+    # ==================== Hardware Configuration ====================
+    hw_group = parser.add_argument_group('Hardware Configuration')
+    hw_group.add_argument('--devices', type=int, default=2,
+                          help='Number of GPUs to use')
+    hw_group.add_argument('--accelerator', type=str, default='gpu',
+                          choices=['gpu', 'cpu', 'auto'],
+                          help='Accelerator type')
+    hw_group.add_argument('--strategy', type=str, default='ddp',
+                          choices=['ddp', 'ddp_spawn', 'auto'],
+                          help='Distributed training strategy')
+    hw_group.add_argument('--precision', type=str, default='16-mixed',
+                          choices=['32', '16-mixed', 'bf16-mixed'],
+                          help='Training precision')
+    
+    # ==================== Scheduler Configuration ====================
+    sched_group = parser.add_argument_group('Scheduler Configuration')
+    sched_group.add_argument('--scheduler', type=str, default='cosine',
+                             choices=['cosine', 'step', 'none'],
+                             help='Learning rate scheduler type')
+    
+    # ==================== Logging & Checkpointing ====================
+    log_group = parser.add_argument_group('Logging & Checkpointing')
+    log_group.add_argument('--log-every-n-steps', type=int, default=50,
+                           help='Log metrics every N training steps')
+    log_group.add_argument('--val-check-interval', type=float, default=1.0,
+                           help='Validation check interval (1.0 = every epoch)')
+    log_group.add_argument('--save-top-k', type=int, default=3,
+                           help='Number of best checkpoints to save')
+    log_group.add_argument('--checkpoint-dir', type=str, default='checkpoints',
+                           help='Directory to save checkpoints')
+    log_group.add_argument('--refresh-rate', type=int, default=1,
+                           help='Progress bar refresh rate (updates per second). Set to 0 to disable.')
+    log_group.add_argument('--experiment-name', type=str, default='deepfake_gan',
+                           help='Experiment name for logging')
+    
+    # ==================== Misc Configuration ====================
+    misc_group = parser.add_argument_group('Miscellaneous')
+    misc_group.add_argument('--seed', type=int, default=42,
+                            help='Random seed for reproducibility')
+    misc_group.add_argument('--gradient-clip-val', type=float, default=1.0,
+                            help='Gradient clipping value')
+    misc_group.add_argument('--early-stopping-patience', type=int, default=10,
+                            help='Early stopping patience (epochs)')
     
     args = parser.parse_args()
     
-    # Update config with command line arguments
+    # ==================== Update config with command line arguments ====================
+    
+    # Data config
     if args.hf_dataset:
         default_config.data.hf_dataset_id = args.hf_dataset
         default_config.data.dataset_root = None
-    elif args.data_dir:
+    else:
         default_config.data.dataset_root = args.data_dir
         default_config.data.hf_dataset_id = None
-    if args.batch_size:
-        default_config.data.batch_size = args.batch_size
-    if args.epochs:
-        default_config.training.max_epochs = args.epochs
-    if args.lr:
-        default_config.training.learning_rate = args.lr
-    if args.devices:
-        default_config.training.devices = args.devices
-    if args.no_pretrained:
-        default_config.model.d_pretrained = False
-    if hasattr(args, 'refresh_rate'):
-        default_config.training.refresh_rate = args.refresh_rate
+    default_config.data.batch_size = args.batch_size
+    default_config.data.num_workers = args.num_workers
+    default_config.data.pin_memory = not args.no_pin_memory
+    default_config.data.persistent_workers = not args.no_persistent_workers
+    default_config.data.image_size = args.image_size
+    
+    # Model config
+    default_config.model.d_backbone = args.d_backbone
+    default_config.model.d_pretrained = not args.no_pretrained
+    default_config.model.g_base_channels = args.g_base_channels
+    default_config.model.epsilon = args.epsilon
+    
+    # Training config
+    default_config.training.max_epochs = args.epochs
+    default_config.training.learning_rate = args.lr
+    default_config.training.betas = (args.beta1, args.beta2)
+    default_config.training.weight_decay = args.weight_decay
+    default_config.training.consistency_weight = args.consistency_weight
+    default_config.training.margin = args.margin
+    default_config.training.perturb_weight = args.perturb_weight
+    default_config.training.gradient_clip_val = args.gradient_clip_val
+    default_config.training.precision = args.precision
+    default_config.training.scheduler_type = args.scheduler
+    default_config.training.log_every_n_steps = args.log_every_n_steps
+    default_config.training.val_check_interval = args.val_check_interval
+    default_config.training.save_top_k = args.save_top_k
+    default_config.training.checkpoint_dir = args.checkpoint_dir
+    default_config.training.refresh_rate = args.refresh_rate
+    default_config.training.accelerator = args.accelerator
+    default_config.training.devices = args.devices
+    default_config.training.strategy = args.strategy
+    
+    # Experiment config
+    default_config.experiment_name = args.experiment_name
+    default_config.seed = args.seed
+    
+    # Store early stopping patience in args for use in main()
+    args.early_stopping_patience = args.early_stopping_patience
     
     # Run training
     main(args)
