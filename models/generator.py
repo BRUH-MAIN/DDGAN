@@ -26,33 +26,46 @@ class ConvBlock(nn.Module):
 
 class FrequencyAwareBottleneck(nn.Module):
     """
-    Frequency-aware bottleneck with attention mechanism
+    Frequency-aware bottleneck with EXPLICIT DCT/IDCT transforms
     
-    Uses:
-    - Large kernels (7x7) to capture frequency-like patterns
-    - Depthwise separable convolutions for efficiency
-    - Channel attention gate to emphasize important frequency bands
-    - Residual connection for gradient flow
+    Architecture:
+    1. DCT Transform: Convert spatial features to frequency domain
+    2. Frequency Processing: Learnable manipulation of frequency coefficients
+    3. Channel Attention: Emphasize important frequency bands
+    4. IDCT Transform: Convert back to spatial domain
+    5. Residual Connection: Gradient flow preservation
+    
+    This allows the generator to directly manipulate frequency components
+    when crafting adversarial perturbations.
     """
     
-    def __init__(self, channels):
+    def __init__(self, channels, spatial_size=14):
+        """
+        Args:
+            channels: Number of input/output channels
+            spatial_size: Spatial dimension at bottleneck (default 14 for 224 input with 4 poolings)
+        """
         super(FrequencyAwareBottleneck, self).__init__()
         
-        # Depthwise convolution (7x7 for frequency patterns)
-        self.depthwise = nn.Conv2d(
-            channels, channels, 
-            kernel_size=7, padding=3, 
-            groups=channels
-        )
+        self.channels = channels
+        self.spatial_size = spatial_size
         
-        # Pointwise convolution
-        self.pointwise = nn.Conv2d(channels, channels, kernel_size=1)
+        # Precompute DCT basis matrix (non-trainable)
+        dct_matrix = self._create_dct_matrix(spatial_size)
+        self.register_buffer('dct_matrix', dct_matrix)
         
-        self.norm1 = nn.BatchNorm2d(channels)
-        self.act1 = nn.GELU()
+        # Frequency domain processing (learnable)
+        # Process each channel's frequency coefficients
+        self.freq_conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.freq_norm1 = nn.BatchNorm2d(channels)
+        self.freq_act1 = nn.GELU()
         
-        # Frequency gate (channel attention)
-        self.gate = nn.Sequential(
+        self.freq_conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.freq_norm2 = nn.BatchNorm2d(channels)
+        self.freq_act2 = nn.GELU()
+        
+        # Frequency band attention (channel-wise gating in frequency domain)
+        self.freq_gate = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(channels, channels // 16, 1),
             nn.GELU(),
@@ -60,36 +73,133 @@ class FrequencyAwareBottleneck(nn.Module):
             nn.Sigmoid()
         )
         
-        # Second convolution block
-        self.depthwise2 = nn.Conv2d(
-            channels, channels,
-            kernel_size=7, padding=3,
-            groups=channels
+        # Learnable frequency mask (emphasize/suppress specific frequency bands)
+        # Initialized to ones (no initial bias)
+        self.freq_mask = nn.Parameter(torch.ones(1, channels, spatial_size, spatial_size))
+        
+        # Post-IDCT refinement
+        self.refine = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+            nn.GELU()
         )
-        self.pointwise2 = nn.Conv2d(channels, channels, kernel_size=1)
-        self.norm2 = nn.BatchNorm2d(channels)
-        self.act2 = nn.GELU()
+    
+    def _create_dct_matrix(self, size):
+        """
+        Create DCT-II transformation matrix
+        
+        Args:
+            size: Matrix dimension
+            
+        Returns:
+            DCT transformation matrix [size, size]
+        """
+        import numpy as np
+        matrix = np.zeros((size, size))
+        
+        for k in range(size):
+            for n in range(size):
+                if k == 0:
+                    # DC component normalization
+                    matrix[k, n] = np.sqrt(1 / size)
+                else:
+                    # AC components normalization
+                    matrix[k, n] = np.sqrt(2 / size) * np.cos(
+                        np.pi * k * (2 * n + 1) / (2 * size)
+                    )
+        
+        return torch.FloatTensor(matrix)
+    
+    def dct_2d(self, x):
+        """
+        Apply 2D DCT to each channel independently
+        
+        Args:
+            x: [B, C, H, W] spatial domain features
+            
+        Returns:
+            [B, C, H, W] frequency domain coefficients
+        """
+        B, C, H, W = x.shape
+        
+        # Reshape for batch matrix multiplication: [B*C, H, W]
+        x_flat = x.view(B * C, H, W)
+        
+        # DCT along rows (right multiply with transpose)
+        dct_rows = torch.matmul(x_flat, self.dct_matrix.t())
+        
+        # DCT along columns (left multiply)
+        dct_2d = torch.matmul(self.dct_matrix, dct_rows)
+        
+        # Reshape back: [B, C, H, W]
+        return dct_2d.view(B, C, H, W)
+    
+    def idct_2d(self, x):
+        """
+        Apply 2D Inverse DCT (IDCT) to each channel independently
+        
+        For orthonormal DCT-II, IDCT = DCT^T (transpose)
+        
+        Args:
+            x: [B, C, H, W] frequency domain coefficients
+            
+        Returns:
+            [B, C, H, W] spatial domain features
+        """
+        B, C, H, W = x.shape
+        
+        # Reshape for batch matrix multiplication: [B*C, H, W]
+        x_flat = x.view(B * C, H, W)
+        
+        # IDCT along columns (left multiply with transpose)
+        idct_cols = torch.matmul(self.dct_matrix.t(), x_flat)
+        
+        # IDCT along rows (right multiply)
+        idct_2d = torch.matmul(idct_cols, self.dct_matrix)
+        
+        # Reshape back: [B, C, H, W]
+        return idct_2d.view(B, C, H, W)
     
     def forward(self, x):
+        """
+        Forward pass: Spatial → DCT → Process → IDCT → Spatial
+        
+        Args:
+            x: [B, C, H, W] input features
+            
+        Returns:
+            [B, C, H, W] processed features with frequency-aware perturbations
+        """
         identity = x
         
-        # First block
-        out = self.depthwise(x)
-        out = self.pointwise(out)
-        out = self.norm1(out)
-        out = self.act1(out)
+        # ===== 1. Transform to frequency domain =====
+        freq = self.dct_2d(x)  # [B, C, H, W] frequency coefficients
         
-        # Apply frequency gate
-        gate = self.gate(out)
-        out = out * gate
+        # ===== 2. Process in frequency domain =====
+        # Learnable frequency manipulation
+        freq = self.freq_conv1(freq)
+        freq = self.freq_norm1(freq)
+        freq = self.freq_act1(freq)
         
-        # Second block
-        out = self.depthwise2(out)
-        out = self.pointwise2(out)
-        out = self.norm2(out)
-        out = self.act2(out)
+        freq = self.freq_conv2(freq)
+        freq = self.freq_norm2(freq)
+        freq = self.freq_act2(freq)
         
-        # Residual connection
+        # ===== 3. Apply frequency-aware attention =====
+        # Channel attention in frequency domain
+        gate = self.freq_gate(freq)
+        freq = freq * gate
+        
+        # Apply learnable frequency mask (band selection)
+        freq = freq * self.freq_mask
+        
+        # ===== 4. Transform back to spatial domain =====
+        out = self.idct_2d(freq)  # [B, C, H, W] spatial features
+        
+        # ===== 5. Post-IDCT refinement =====
+        out = self.refine(out)
+        
+        # ===== 6. Residual connection =====
         return out + identity
 
 
@@ -132,13 +242,15 @@ class Generator(nn.Module):
         self.enc4 = ConvBlock(base_channels * 4, base_channels * 8)
         self.pool4 = nn.MaxPool2d(2)
         
-        # Bottleneck with frequency-aware processing
+        # Bottleneck with frequency-aware processing (explicit DCT/IDCT)
         bottleneck_channels = base_channels * 8
+        # Spatial size at bottleneck: 224 / (2^4) = 14
+        bottleneck_spatial_size = 14
         self.bottleneck = nn.Sequential(
             nn.Conv2d(bottleneck_channels, bottleneck_channels, 3, padding=1),
             nn.BatchNorm2d(bottleneck_channels),
             nn.GELU(),
-            FrequencyAwareBottleneck(bottleneck_channels),
+            FrequencyAwareBottleneck(bottleneck_channels, spatial_size=bottleneck_spatial_size),
             nn.Conv2d(bottleneck_channels, bottleneck_channels, 3, padding=1),
             nn.BatchNorm2d(bottleneck_channels),
             nn.GELU()
