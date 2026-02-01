@@ -43,6 +43,8 @@ class DeepfakeGAN(pl.LightningModule):
         
         # Training config
         lr=2e-4,
+        d_lr_mult=0.2,
+        g_lr_mult=0.5,
         betas=(0.5, 0.999),
         weight_decay=0.01,
         consistency_weight=1.0,  # Weight for consistency loss in discriminator
@@ -61,7 +63,9 @@ class DeepfakeGAN(pl.LightningModule):
             d_fusion_type: Fusion type for dual_stream ('concat' or 'add')
             g_base_channels: Base channels for generator
             epsilon: Maximum perturbation magnitude
-            lr: Learning rate
+            lr: Base learning rate
+            d_lr_mult: Discriminator LR multiplier
+            g_lr_mult: Generator LR multiplier
             betas: Adam beta parameters
             weight_decay: Weight decay for AdamW
             consistency_weight: Weight for consistency loss (prediction drift penalty)
@@ -89,6 +93,7 @@ class DeepfakeGAN(pl.LightningModule):
         )
         
         # Loss function with class weighting for imbalanced data
+        # Label convention: real=1 (positive), fake=0 (negative)
         # Dataset is ~88% fake, ~12% real, so weight real samples higher
         # pos_weight > 1 increases recall for positive class (real=1 in BCE)
         # Using sqrt of ratio for less aggressive weighting
@@ -129,29 +134,23 @@ class DeepfakeGAN(pl.LightningModule):
         Returns:
             Scalar loss (mean of margin violations)
         """
-        margin = self.hparams.margin  # Default 0.3, tune in range [0.2, 0.5]
+        margin = self.hparams.margin  # Tune in range [0.2, 0.5]
         # Only penalize if logit > margin (discriminator still confident it's real)
         # Once logit ≤ margin, stop pushing → bounded pressure
         return torch.mean(F.relu(logits - margin))
     
     def perturbation_loss(self, perturbation):
         """
-        L2 perturbation regularization (smoother gradients than L1).
-        
-        Normalized by flattening to [B, -1] and computing per-sample L2 norm,
-        then averaging across batch.
+        Scale-invariant perturbation regularization (mean squared magnitude).
         
         Args:
             perturbation: Perturbation tensor [B, C, H, W]
             
         Returns:
-            Scalar loss (mean L2 norm across batch)
+            Scalar loss (mean squared magnitude)
         """
-        batch_size = perturbation.size(0)
-        # Flatten to [B, C*H*W] and compute L2 norm per sample
-        flat = perturbation.view(batch_size, -1)
-        l2_norms = torch.norm(flat, p=2, dim=1)  # [B]
-        return torch.mean(l2_norms)
+        # Mean squared magnitude makes the penalty independent of image size
+        return torch.mean(perturbation ** 2)
     
     def training_step(self, batch, batch_idx):
         """
@@ -169,10 +168,9 @@ class DeepfakeGAN(pl.LightningModule):
             print(f"[WARNING] batch={batch_idx}: NaN/inf detected in input images!")
         
         # Separate real and fake images
-        # IMPORTANT: Verify label convention from dataset!
-        # HuggingFace celebdfv2: 0='real', 1='fake' (index-based from folder order)
-        real_mask = labels == 0  # 0 = real
-        fake_mask = labels == 1  # 1 = fake
+        # Label convention (normalized in DataModule): real=1, fake=0
+        real_mask = labels == 1  # 1 = real
+        fake_mask = labels == 0  # 0 = fake
         
         real_images = images[real_mask]
         fake_images = images[fake_mask]
@@ -380,17 +378,19 @@ class DeepfakeGAN(pl.LightningModule):
     def configure_optimizers(self):
         """Configure separate optimizers for discriminator and generator"""
         # Discriminator optimizer (lower LR - defensive stance)
+        d_lr = self.hparams.lr * self.hparams.d_lr_mult
         d_optimizer = torch.optim.AdamW(
             self.discriminator.parameters(),
-            lr=2e-5,  # Lower LR to recover under attack
+            lr=d_lr,
             betas=self.hparams.betas,
             weight_decay=self.hparams.weight_decay
         )
         
         # Generator optimizer (higher LR - let it lead)
+        g_lr = self.hparams.lr * self.hparams.g_lr_mult
         g_optimizer = torch.optim.AdamW(
             self.generator.parameters(),
-            lr=5e-5,  # Higher LR to maintain attack pressure
+            lr=g_lr,
             betas=self.hparams.betas,
             weight_decay=self.hparams.weight_decay
         )
@@ -431,7 +431,7 @@ if __name__ == "__main__":
     print(f"\nBatch size: {batch_size}")
     print(f"Images shape: {images.shape}")
     print(f"Labels shape: {labels.shape}")
-    print(f"Label distribution: Real={torch.sum(labels == 0).item()}, Fake={torch.sum(labels == 1).item()}")
+    print(f"Label distribution: Real={torch.sum(labels == 1).item()}, Fake={torch.sum(labels == 0).item()}")
     
     # ===== Test with Dual-Stream Discriminator =====
     print("\n--- Testing with Dual-Stream Discriminator ---")

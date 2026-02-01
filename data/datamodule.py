@@ -43,12 +43,15 @@ class DeepfakeDataset(Dataset):
         self.transform = transform
         
         # Collect all image paths with labels
+        # Convention: real=1 (positive), fake=0 (negative)
         self.samples = []
-        for label_idx, label in enumerate(['real', 'fake']):
+        label_map = {'real': 1, 'fake': 0}
+        for label in ['real', 'fake']:
             label_dir = self.root_dir / split / label
             if not label_dir.exists():
                 print(f"Warning: {label_dir} not found!")
                 continue
+            label_idx = label_map[label]
             
             # Check if directory has subdirectories (part_0, part_1, etc.)
             subdirs = sorted(label_dir.glob('part_*'))
@@ -65,8 +68,8 @@ class DeepfakeDataset(Dataset):
         print(f"Loaded {len(self.samples)} images from {split} set")
         
         # Calculate class distribution
-        real_count = sum(1 for _, label in self.samples if label == 0)
-        fake_count = sum(1 for _, label in self.samples if label == 1)
+        real_count = sum(1 for _, label in self.samples if label == 1)
+        fake_count = sum(1 for _, label in self.samples if label == 0)
         print(f"  Real: {real_count}, Fake: {fake_count}")
     
     def __len__(self):
@@ -119,7 +122,9 @@ class HuggingFaceDeepfakeDataset(Dataset):
             image = Image.fromarray(image)
         image = image.convert('RGB')
         
-        label = item['label']
+        # HuggingFace label convention is typically 0=real, 1=fake
+        # Remap to real=1 (positive), fake=0 (negative)
+        label = 1 - int(item['label'])
         
         # Apply transformations
         if self.transform:

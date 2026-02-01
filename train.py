@@ -96,6 +96,8 @@ def main(args):
     print(f"Image size: {default_config.data.image_size}")
     print(f"Max epochs: {default_config.training.max_epochs}")
     print(f"Learning rate: {default_config.training.learning_rate}")
+    print(f"D LR mult: {default_config.training.d_lr_mult}")
+    print(f"G LR mult: {default_config.training.g_lr_mult}")
     print(f"Weight decay: {default_config.training.weight_decay}")
     print(f"Consistency weight: {default_config.training.consistency_weight}")
     print(f"Margin: {default_config.training.margin}")
@@ -131,6 +133,8 @@ def main(args):
         g_base_channels=default_config.model.g_base_channels,
         epsilon=default_config.model.epsilon,
         lr=default_config.training.learning_rate,
+        d_lr_mult=default_config.training.d_lr_mult,
+        g_lr_mult=default_config.training.g_lr_mult,
         betas=default_config.training.betas,
         weight_decay=default_config.training.weight_decay,
         consistency_weight=default_config.training.consistency_weight,
@@ -146,11 +150,11 @@ def main(args):
     # Progress bar callback - single bar per epoch with live metric updates
     progress_bar = CleanProgressBar(refresh_rate=default_config.training.refresh_rate)
     
-    # Model checkpoint callback (monitor AUC, not accuracy - aligned with robustness objective)
+    # Model checkpoint callback (monitor adversarial AUC for robustness)
     checkpoint_callback = ModelCheckpoint(
         dirpath=default_config.training.checkpoint_dir,
-        filename='{epoch:02d}-{val/auc_clean:.4f}',
-        monitor='val/auc_clean',
+        filename='{epoch:02d}-{val/auc_adv:.4f}',
+        monitor='val/auc_adv',
         mode='max',
         save_top_k=default_config.training.save_top_k,
         save_last=True,
@@ -160,9 +164,9 @@ def main(args):
     # Learning rate monitor
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     
-    # Early stopping (monitor AUC, not accuracy - aligned with robustness objective)
+    # Early stopping (monitor adversarial AUC for robustness)
     early_stopping = EarlyStopping(
-        monitor='val/auc_clean',
+        monitor='val/auc_adv',
         patience=args.early_stopping_patience,
         mode='max',
         verbose=True

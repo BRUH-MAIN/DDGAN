@@ -47,7 +47,9 @@ class TrainingConfig:
     """Training configuration"""
     # Training parameters
     max_epochs: int = 30
-    learning_rate: float = 1e-4  # Reduced from 2e-4 for stability
+    learning_rate: float = 1e-4  # Base LR (scaled by D/G multipliers)
+    d_lr_mult: float = 0.2  # Discriminator LR multiplier
+    g_lr_mult: float = 0.5  # Generator LR multiplier
     betas: tuple = (0.5, 0.999)
     weight_decay: float = 0.01
     

@@ -1,4 +1,98 @@
-# Deepfake Detection GAN
+# Deepfake Robustness Training (DDGAN)
+
+This project trains a deepfake detector with **adversarial robustness**, not a classical GAN objective.
+
+**Key idea:** the generator produces *bounded perturbations*; the discriminator remains a *strong classifier* and is trained to be consistent under those perturbations.
+
+## Summary
+
+- **Discriminator:** ConvNeXt backbone with a **dual-stream** RGB + DCT fusion (default).
+- **Generator:** U-Net that produces bounded perturbations (epsilon-bounded).
+- **Objective:** Robust classification via consistency loss + margin loss (not BCE on adversarial labels).
+
+## Label Convention (Important)
+
+This codebase normalizes labels to:
+
+- **real = 1 (positive class)**
+- **fake = 0 (negative class)**
+
+This is applied uniformly in both local and HuggingFace datasets to keep training, validation, and metrics consistent.
+
+## Losses (Implemented)
+
+Let $D(x)$ be discriminator logits and $G(x)$ be the adversarial perturbation.
+
+**Discriminator loss:**
+
+$$
+L_D = L_{real} + L_{fake} + \lambda_{cons} \cdot \mathbb{E}\left[(\sigma(D(x)) - \sigma(D(x_{adv})))^2\right]
+$$
+
+**Generator loss:**
+
+$$
+L_G = \mathbb{E}[\max(0, D(x_{adv}) - m)] + \lambda_{pert} \cdot \mathbb{E}[||\delta||_2^2]
+$$
+
+Where $x_{adv} = x + \delta$ and $\delta = G(x)$ is epsilon-bounded.
+
+## Metrics (Logged)
+
+Validation computes **both** clean and adversarial metrics:
+
+- `val/auc_clean`
+- `val/auc_adv`
+- `val/robustness_gap = auc_clean - auc_adv`
+
+Model selection is based on **adversarial AUC** by default.
+
+## Architecture
+
+### Discriminator
+
+- Dual-stream ConvNeXt (default): RGB stream + DCT stream with learnable frequency filters.
+- Legacy single-stream DCT-only discriminator is supported.
+
+### Generator
+
+- U-Net with a frequency-aware bottleneck (explicit DCT/IDCT).
+- Outputs bounded perturbations (epsilon constraint).
+
+## Configuration
+
+Edit [config.py](config.py) to adjust:
+
+- Model type (`d_type`, `d_fusion_type`)
+- Loss weights (`consistency_weight`, `margin`, `perturb_weight`)
+- Optimization (`learning_rate`, `d_lr_mult`, `g_lr_mult`)
+
+## Training
+
+```bash
+python train.py
+```
+
+## Notes
+
+- This is **not** GAN-style realism training.
+- The generator does **not** synthesize fake images.
+- Robustness must be evaluated via **adversarial AUC** and **robustness gap**.
+
+## Project Structure
+
+```
+DDGAN/
+├── config.py                   # Configuration management
+├── train.py                    # Main training script
+├── lightning_module.py         # PyTorch Lightning module
+├── models/
+│   ├── discriminator.py        # Discriminator model(s)
+│   └── generator.py            # Generator model
+├── data/
+│   └── datamodule.py           # DataModule + label normalization
+└── logs/                        # Training logs
+```# Deepfake Detection GAN
 
 A robust deepfake detector using GAN-based adversarial training with DCT features and ConvNeXt backbone.
 
