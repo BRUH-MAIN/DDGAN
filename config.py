@@ -10,7 +10,7 @@ class DataConfig:
     """Data-related configuration"""
     # Data source (use either dataset_root OR hf_dataset_id, not both)
     dataset_root: Path = Path('celebdfv2_images')  # Local dataset path
-    hf_dataset_id: str = None  # HuggingFace dataset ID (e.g., 'RohanRamesh/celebdfv2_224')
+    hf_dataset_id: str = 'RohanRamesh/celebdfv2_224'  # HuggingFace dataset ID
     
     batch_size: int = 32
     num_workers: int = 4
@@ -33,6 +33,8 @@ class ModelConfig:
     d_backbone: str = 'convnext_tiny'
     d_pretrained: bool = True
     d_num_classes: int = 1
+    d_type: str = 'dual_stream'  # 'single_stream' (legacy DCT-only) or 'dual_stream' (RGB + DCT)
+    d_fusion_type: str = 'concat'  # For dual_stream: 'concat' or 'add'
     
     # Generator settings
     g_input_channels: int = 3
@@ -44,7 +46,7 @@ class ModelConfig:
 class TrainingConfig:
     """Training configuration"""
     # Training parameters
-    max_epochs: int = 50
+    max_epochs: int = 30
     learning_rate: float = 1e-4  # Reduced from 2e-4 for stability
     betas: tuple = (0.5, 0.999)
     weight_decay: float = 0.01

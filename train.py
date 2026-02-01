@@ -101,6 +101,8 @@ def main(args):
     print(f"Margin: {default_config.training.margin}")
     print(f"Perturb weight: {default_config.training.perturb_weight}")
     print(f"Epsilon: {default_config.model.epsilon}")
+    print(f"Discriminator type: {default_config.model.d_type}")
+    print(f"Fusion type: {default_config.model.d_fusion_type}")
     print(f"Devices: {default_config.training.devices} {default_config.training.accelerator}")
     print(f"Precision: {default_config.training.precision}")
     print(f"Seed: {default_config.seed}")
@@ -124,6 +126,8 @@ def main(args):
     model = DeepfakeGAN(
         d_backbone=default_config.model.d_backbone,
         d_pretrained=default_config.model.d_pretrained,
+        d_type=default_config.model.d_type,
+        d_fusion_type=default_config.model.d_fusion_type,
         g_base_channels=default_config.model.g_base_channels,
         epsilon=default_config.model.epsilon,
         lr=default_config.training.learning_rate,

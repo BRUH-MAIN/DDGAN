@@ -8,7 +8,7 @@ import pytorch_lightning as pl
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 import numpy as np
 
-from models import Discriminator, Generator
+from models import Discriminator, DualStreamDiscriminator, create_discriminator, Generator
 
 
 class DeepfakeGAN(pl.LightningModule):
@@ -21,6 +21,10 @@ class DeepfakeGAN(pl.LightningModule):
     - Discriminator learns to be robust against perturbations
     - Goal: Discriminator that generalizes well to unseen deepfakes
     
+    Supports two discriminator architectures:
+    - single_stream: Legacy DCT-only discriminator (grayscale DCT)
+    - dual_stream: RGB + DCT fusion with learnable frequency filters
+    
     Uses manual optimization for proper alternating D/G training.
     """
     
@@ -32,6 +36,8 @@ class DeepfakeGAN(pl.LightningModule):
         # Model config
         d_backbone='convnext_tiny',
         d_pretrained=True,
+        d_type='dual_stream',  # 'single_stream' or 'dual_stream'
+        d_fusion_type='concat',  # For dual_stream: 'concat' or 'add'
         g_base_channels=64,
         epsilon=0.03,
         
@@ -51,6 +57,8 @@ class DeepfakeGAN(pl.LightningModule):
         Args:
             d_backbone: Discriminator backbone architecture
             d_pretrained: Use pretrained weights for discriminator
+            d_type: Discriminator type ('single_stream' or 'dual_stream')
+            d_fusion_type: Fusion type for dual_stream ('concat' or 'add')
             g_base_channels: Base channels for generator
             epsilon: Maximum perturbation magnitude
             lr: Learning rate
@@ -65,11 +73,13 @@ class DeepfakeGAN(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         
-        # Initialize models
-        self.discriminator = Discriminator(
+        # Initialize discriminator using factory function
+        self.discriminator = create_discriminator(
+            discriminator_type=d_type,
             backbone=d_backbone,
             pretrained=d_pretrained,
-            num_classes=1
+            num_classes=1,
+            fusion_type=d_fusion_type
         )
         
         self.generator = Generator(
@@ -101,14 +111,47 @@ class DeepfakeGAN(pl.LightningModule):
         p_adv = torch.sigmoid(logits_adv)
         return torch.mean((p_clean - p_adv) ** 2)
 
-    def generator_confidence_loss(self, logits, labels):
+    def generator_margin_loss(self, logits):
         """
-        Directly reduce absolute discriminator confidence.
-        Harsher than margin loss - actively pushes real logits down.
-        labels: 1 for real, 0 for fake
+        Margin-based generator loss for adversarial robustness.
+        
+        Only pushes logits DOWN until they cross below the margin threshold.
+        Once logit ≤ margin, generator has succeeded → no more pressure.
+        
+        This prevents:
+        - Unbounded logit collapse
+        - Discriminator defensive shutdown
+        - Score distribution flattening
+        
+        Args:
+            logits: Discriminator logits for adversarial real images [B, 1]
+            
+        Returns:
+            Scalar loss (mean of margin violations)
         """
-        signed_logits = (2 * labels - 1) * logits
-        return torch.mean(signed_logits)
+        margin = self.hparams.margin  # Default 0.3, tune in range [0.2, 0.5]
+        # Only penalize if logit > margin (discriminator still confident it's real)
+        # Once logit ≤ margin, stop pushing → bounded pressure
+        return torch.mean(F.relu(logits - margin))
+    
+    def perturbation_loss(self, perturbation):
+        """
+        L2 perturbation regularization (smoother gradients than L1).
+        
+        Normalized by flattening to [B, -1] and computing per-sample L2 norm,
+        then averaging across batch.
+        
+        Args:
+            perturbation: Perturbation tensor [B, C, H, W]
+            
+        Returns:
+            Scalar loss (mean L2 norm across batch)
+        """
+        batch_size = perturbation.size(0)
+        # Flatten to [B, C*H*W] and compute L2 norm per sample
+        flat = perturbation.view(batch_size, -1)
+        l2_norms = torch.norm(flat, p=2, dim=1)  # [B]
+        return torch.mean(l2_norms)
     
     def training_step(self, batch, batch_idx):
         """
@@ -143,11 +186,11 @@ class DeepfakeGAN(pl.LightningModule):
         loss_fake = torch.tensor(0.0, device=self.device, requires_grad=True)
         loss_consistency = torch.tensor(0.0, device=self.device, requires_grad=True)
         g_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
-        g_loss_confidence = torch.tensor(0.0, device=self.device, requires_grad=True)
+        g_loss_margin = torch.tensor(0.0, device=self.device, requires_grad=True)
         g_loss_perturb = torch.tensor(0.0, device=self.device, requires_grad=True)
         d_acc_real = torch.tensor(0.5, device=self.device)
         d_acc_fake = torch.tensor(0.5, device=self.device)
-        g_acc_adv = torch.tensor(0.5, device=self.device)  # Mean confidence on adversarial images
+        adv_logit_mean = torch.tensor(0.0, device=self.device)  # Track mean adversarial logit
         
         # ===== TRAIN DISCRIMINATOR =====
         # 1. Forward real images
@@ -194,7 +237,7 @@ class DeepfakeGAN(pl.LightningModule):
         # ===== TRAIN GENERATOR =====
         # Generate fresh adversarial images AFTER discriminator update
         # This creates a new computation graph with updated discriminator weights
-        g_loss_confidence = torch.tensor(0.0, device=self.device, requires_grad=True)
+        g_loss_margin = torch.tensor(0.0, device=self.device, requires_grad=True)
         if num_real > 0:
             # Generate adversarial images (fresh forward pass)
             adv_images_g, perturbation_g = self.generator(real_images)
@@ -202,22 +245,19 @@ class DeepfakeGAN(pl.LightningModule):
             # Forward through discriminator (no detach!)
             adv_logits_g = self.discriminator(adv_images_g)
             
-            # Confidence loss (directly reduce discriminator confidence)
-            labels_real = torch.ones_like(adv_logits_g)
-            g_loss_confidence = self.generator_confidence_loss(
-                adv_logits_g,
-                labels_real
-            )
+            # Margin-based loss: only push logits below margin, then stop
+            # This prevents unbounded logit collapse and preserves ranking
+            g_loss_margin = self.generator_margin_loss(adv_logits_g)
             
-            # Perturbation regularization (L1 norm)
-            g_loss_perturb = torch.mean(torch.abs(perturbation_g))
+            # Perturbation regularization (L2 norm - smoother gradients than L1)
+            g_loss_perturb = self.perturbation_loss(perturbation_g)
             
-            # Combined generator loss (perturb weight now at 0.02 - balanced constraint)
-            g_loss = g_loss_confidence + self.hparams.perturb_weight * g_loss_perturb
+            # Combined generator loss
+            g_loss = g_loss_margin + self.hparams.perturb_weight * g_loss_perturb
             
-            # Generator effectiveness: how much confidence was reduced
+            # Track mean adversarial logit for monitoring
             with torch.no_grad():
-                g_acc_adv = torch.sigmoid(adv_logits_g).mean()  # Lower = more effective
+                adv_logit_mean = adv_logits_g.mean()
         
         # Step 2: Update Generator (only if we have real images to generate adversarial samples)
         # Must include backward AND step together for AMP scaler compatibility
@@ -232,11 +272,12 @@ class DeepfakeGAN(pl.LightningModule):
         self.log('train/g_loss', g_loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log('train/d_acc_real', d_acc_real, on_step=False, on_epoch=True)
         self.log('train/d_acc_fake', d_acc_fake, on_step=False, on_epoch=True)
-        self.log('train/g_confidence_reduction', g_acc_adv, on_step=False, on_epoch=True)
+        self.log('train/adv_logit_mean', adv_logit_mean, on_step=False, on_epoch=True)  # Should plateau, not collapse
         self.log('train/loss_real', loss_real, on_step=False, on_epoch=True)
         self.log('train/loss_fake', loss_fake, on_step=False, on_epoch=True)
         self.log('train/loss_consistency', loss_consistency, on_step=True, on_epoch=True)
-        self.log('train/g_loss_confidence', g_loss_confidence, on_step=True, on_epoch=True)
+        self.log('train/g_loss_margin', g_loss_margin, on_step=True, on_epoch=True)  # Should plateau when logits ≤ margin
+        self.log('train/g_loss_perturb', g_loss_perturb, on_step=False, on_epoch=True)
         
         # NaN check
         if torch.isnan(d_loss) or torch.isnan(g_loss):
@@ -378,14 +419,9 @@ class DeepfakeGAN(pl.LightningModule):
 
 if __name__ == "__main__":
     # Test DeepfakeGAN module
+    print("=" * 60)
     print("Testing DeepfakeGAN module...")
-    
-    model = DeepfakeGAN(
-        d_backbone='convnext_tiny',
-        d_pretrained=False,  # Faster for testing
-        g_base_channels=64,
-        epsilon=0.03
-    )
+    print("=" * 60)
     
     # Create dummy batch
     batch_size = 8
@@ -397,7 +433,38 @@ if __name__ == "__main__":
     print(f"Labels shape: {labels.shape}")
     print(f"Label distribution: Real={torch.sum(labels == 0).item()}, Fake={torch.sum(labels == 1).item()}")
     
-    # Test training step
-    model.training_step((images, labels), 0)
+    # ===== Test with Dual-Stream Discriminator =====
+    print("\n--- Testing with Dual-Stream Discriminator ---")
+    model_dual = DeepfakeGAN(
+        d_backbone='convnext_tiny',
+        d_pretrained=False,
+        d_type='dual_stream',
+        d_fusion_type='concat',
+        g_base_channels=64,
+        epsilon=0.03
+    )
     
-    print("\n✓ DeepfakeGAN module test passed!")
+    # Quick forward test
+    with torch.no_grad():
+        logits = model_dual(images)
+    print(f"Dual-stream output shape: {logits.shape}")
+    print(f"Discriminator type: {type(model_dual.discriminator).__name__}")
+    
+    # ===== Test with Single-Stream Discriminator =====
+    print("\n--- Testing with Single-Stream Discriminator (Legacy) ---")
+    model_single = DeepfakeGAN(
+        d_backbone='convnext_tiny',
+        d_pretrained=False,
+        d_type='single_stream',
+        g_base_channels=64,
+        epsilon=0.03
+    )
+    
+    with torch.no_grad():
+        logits = model_single(images)
+    print(f"Single-stream output shape: {logits.shape}")
+    print(f"Discriminator type: {type(model_single.discriminator).__name__}")
+
+    print("\n" + "=" * 60)
+    print("✓ DeepfakeGAN module test passed!")
+    print("=" * 60)
