@@ -5,7 +5,7 @@ import os
 import sys
 import torch
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping, TQDMProgressBar
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping, TQDMProgressBar, Callback
 from pytorch_lightning.loggers import TensorBoardLogger
 import argparse
 from pathlib import Path
@@ -71,6 +71,45 @@ class CleanProgressBar(TQDMProgressBar):
             shortened[short_key] = value
         
         return shortened
+
+
+class RobustnessGapEarlyStop(Callback):
+    """Stop training when robustness gap stabilizes."""
+
+    def __init__(self, delta: float = 0.002, patience: int = 3, min_epochs: int = 1):
+        super().__init__()
+        self.delta = delta
+        self.patience = patience
+        self.min_epochs = min_epochs
+        self._prev_gap = None
+        self._stable_epochs = 0
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if trainer.current_epoch < self.min_epochs:
+            return
+
+        gap = trainer.callback_metrics.get('val/robustness_gap')
+        if gap is None:
+            return
+
+        if isinstance(gap, torch.Tensor):
+            gap = gap.detach().cpu().item()
+
+        if self._prev_gap is not None:
+            if abs(gap - self._prev_gap) < self.delta:
+                self._stable_epochs += 1
+            else:
+                self._stable_epochs = 0
+
+        self._prev_gap = gap
+
+        if self._stable_epochs >= self.patience:
+            trainer.should_stop = True
+            if trainer.is_global_zero:
+                print(
+                    f"[EarlyStop] Robustness gap stabilized: |Δgap| < {self.delta} "
+                    f"for {self.patience} epochs."
+                )
 
 
 def main(args):
@@ -171,6 +210,9 @@ def main(args):
         mode='max',
         verbose=True
     )
+
+    # Early stopping on robustness gap stabilization
+    gap_early_stopping = RobustnessGapEarlyStop(delta=0.002, patience=3, min_epochs=1)
     
     # Logger
     logger = TensorBoardLogger(
@@ -188,7 +230,7 @@ def main(args):
         devices=default_config.training.devices,
         strategy=default_config.training.strategy if default_config.training.devices > 1 else 'auto',
         precision=default_config.training.precision,
-        callbacks=[progress_bar, checkpoint_callback, lr_monitor, early_stopping],
+        callbacks=[progress_bar, checkpoint_callback, lr_monitor, early_stopping, gap_early_stopping],
         logger=logger,
         log_every_n_steps=default_config.training.log_every_n_steps,
         val_check_interval=default_config.training.val_check_interval,

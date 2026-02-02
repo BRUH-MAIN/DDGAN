@@ -137,7 +137,9 @@ class DeepfakeGAN(pl.LightningModule):
         margin = self.hparams.margin  # Tune in range [0.2, 0.5]
         # Only penalize if logit > margin (discriminator still confident it's real)
         # Once logit ≤ margin, stop pushing → bounded pressure
-        return torch.mean(F.relu(logits - margin))
+        violation = F.relu(logits - margin)
+        scale = logits.abs().mean().detach() + 1e-6
+        return torch.mean(violation / scale)
     
     def perturbation_loss(self, perturbation):
         """
@@ -185,6 +187,7 @@ class DeepfakeGAN(pl.LightningModule):
         loss_consistency = torch.tensor(0.0, device=self.device, requires_grad=True)
         g_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         g_loss_margin = torch.tensor(0.0, device=self.device, requires_grad=True)
+        g_loss_confidence = torch.tensor(0.0, device=self.device, requires_grad=True)
         g_loss_perturb = torch.tensor(0.0, device=self.device, requires_grad=True)
         d_acc_real = torch.tensor(0.5, device=self.device)
         d_acc_fake = torch.tensor(0.5, device=self.device)
@@ -245,7 +248,9 @@ class DeepfakeGAN(pl.LightningModule):
             
             # Margin-based loss: only push logits below margin, then stop
             # This prevents unbounded logit collapse and preserves ranking
-            g_loss_margin = self.generator_margin_loss(adv_logits_g)
+            g_loss_confidence = self.generator_margin_loss(adv_logits_g)
+            g_loss_confidence = torch.clamp(g_loss_confidence, max=1.0)
+            g_loss_margin = g_loss_confidence
             
             # Perturbation regularization (L2 norm - smoother gradients than L1)
             g_loss_perturb = self.perturbation_loss(perturbation_g)
