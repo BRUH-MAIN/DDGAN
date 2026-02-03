@@ -442,8 +442,5 @@ if __name__ == "__main__":
     default_config.experiment_name = args.experiment_name
     default_config.seed = args.seed
     
-    # Store early stopping patience in args for use in main()
-    args.early_stopping_patience = args.early_stopping_patience
-    
     # Run training
     main(args)
