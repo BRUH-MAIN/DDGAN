@@ -5,7 +5,7 @@ import os
 import sys
 import torch
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping, TQDMProgressBar, Callback
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, TQDMProgressBar, Callback
 from pytorch_lightning.loggers import TensorBoardLogger
 import argparse
 from pathlib import Path
@@ -73,43 +73,68 @@ class CleanProgressBar(TQDMProgressBar):
         return shortened
 
 
-class RobustnessGapEarlyStop(Callback):
-    """Stop training when robustness gap stabilizes."""
+class MultiCriteriaEarlyStop(Callback):
+    """Stop when any stopping rule is satisfied."""
 
-    def __init__(self, delta: float = 0.002, patience: int = 3, min_epochs: int = 1):
+    def __init__(
+        self,
+        auc_patience: int = 2,
+        gap_threshold: float = 0.01,
+        margin_violation_threshold: float = 0.05,
+        min_epochs: int = 1
+    ):
         super().__init__()
-        self.delta = delta
-        self.patience = patience
+        self.auc_patience = auc_patience
+        self.gap_threshold = gap_threshold
+        self.margin_violation_threshold = margin_violation_threshold
         self.min_epochs = min_epochs
-        self._prev_gap = None
-        self._stable_epochs = 0
+        self._best_auc = None
+        self._epochs_since_improve = 0
+
+    def _to_float(self, value):
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().item()
+        return float(value)
 
     def on_validation_epoch_end(self, trainer, pl_module):
         if trainer.current_epoch < self.min_epochs:
             return
 
-        gap = trainer.callback_metrics.get('val/robustness_gap')
-        if gap is None:
-            return
+        metrics = trainer.callback_metrics
+        auc_adv = self._to_float(metrics.get('val/auc_adv'))
+        robustness_gap = self._to_float(metrics.get('val/robustness_gap'))
+        margin_violation_rate = self._to_float(metrics.get('train/margin_violation_rate'))
 
-        if isinstance(gap, torch.Tensor):
-            gap = gap.detach().cpu().item()
+        stop_reasons = []
 
-        if self._prev_gap is not None:
-            if abs(gap - self._prev_gap) < self.delta:
-                self._stable_epochs += 1
+        if auc_adv is not None:
+            if self._best_auc is None or auc_adv > self._best_auc:
+                self._best_auc = auc_adv
+                self._epochs_since_improve = 0
             else:
-                self._stable_epochs = 0
+                self._epochs_since_improve += 1
 
-        self._prev_gap = gap
+            if self._epochs_since_improve >= self.auc_patience:
+                stop_reasons.append(
+                    f"val/auc_adv not improved for {self.auc_patience} epochs"
+                )
 
-        if self._stable_epochs >= self.patience:
+        if robustness_gap is not None and robustness_gap > self.gap_threshold:
+            stop_reasons.append(
+                f"val/robustness_gap {robustness_gap:.4f} > {self.gap_threshold}"
+            )
+
+        if margin_violation_rate is not None and margin_violation_rate < self.margin_violation_threshold:
+            stop_reasons.append(
+                f"train/margin_violation_rate {margin_violation_rate:.4f} < {self.margin_violation_threshold}"
+            )
+
+        if stop_reasons:
             trainer.should_stop = True
             if trainer.is_global_zero:
-                print(
-                    f"[EarlyStop] Robustness gap stabilized: |Δgap| < {self.delta} "
-                    f"for {self.patience} epochs."
-                )
+                print("[EarlyStop] " + " | ".join(stop_reasons))
 
 
 def main(args):
@@ -139,7 +164,7 @@ def main(args):
     print(f"G LR mult: {default_config.training.g_lr_mult}")
     print(f"Weight decay: {default_config.training.weight_decay}")
     print(f"Consistency weight: {default_config.training.consistency_weight}")
-    print(f"Margin: {default_config.training.margin}")
+    print(f"Margin max: {default_config.training.margin_max}")
     print(f"Perturb weight: {default_config.training.perturb_weight}")
     print(f"Epsilon: {default_config.model.epsilon}")
     print(f"Discriminator type: {default_config.model.d_type}")
@@ -177,7 +202,7 @@ def main(args):
         betas=default_config.training.betas,
         weight_decay=default_config.training.weight_decay,
         consistency_weight=default_config.training.consistency_weight,
-        margin=default_config.training.margin,
+        margin_max=default_config.training.margin_max,
         perturb_weight=default_config.training.perturb_weight,
         scheduler_type=default_config.training.scheduler_type,
         max_epochs=default_config.training.max_epochs
@@ -203,16 +228,13 @@ def main(args):
     # Learning rate monitor
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     
-    # Early stopping (monitor adversarial AUC for robustness)
-    early_stopping = EarlyStopping(
-        monitor='val/auc_adv',
-        patience=args.early_stopping_patience,
-        mode='max',
-        verbose=True
+    # Multi-criteria early stopping (formalized rules)
+    multi_criteria_stop = MultiCriteriaEarlyStop(
+        auc_patience=2,
+        gap_threshold=0.01,
+        margin_violation_threshold=0.05,
+        min_epochs=1
     )
-
-    # Early stopping on robustness gap stabilization
-    gap_early_stopping = RobustnessGapEarlyStop(delta=0.002, patience=3, min_epochs=1)
     
     # Logger
     logger = TensorBoardLogger(
@@ -230,7 +252,7 @@ def main(args):
         devices=default_config.training.devices,
         strategy=default_config.training.strategy if default_config.training.devices > 1 else 'auto',
         precision=default_config.training.precision,
-        callbacks=[progress_bar, checkpoint_callback, lr_monitor, early_stopping, gap_early_stopping],
+        callbacks=[progress_bar, checkpoint_callback, lr_monitor, multi_criteria_stop],
         logger=logger,
         log_every_n_steps=default_config.training.log_every_n_steps,
         val_check_interval=default_config.training.val_check_interval,
@@ -264,7 +286,7 @@ def main(args):
     print("TRAINING COMPLETE")
     print("=" * 60)
     print(f"Best model checkpoint: {checkpoint_callback.best_model_path}")
-    print(f"Best validation accuracy: {checkpoint_callback.best_model_score:.4f}")
+    print(f"Best val/auc_adv: {checkpoint_callback.best_model_score:.4f}")
     print("=" * 60 + "\n")
     
     # Save final model
@@ -326,8 +348,8 @@ if __name__ == "__main__":
     loss_group = parser.add_argument_group('Loss Configuration')
     loss_group.add_argument('--consistency-weight', type=float, default=1.0,
                             help='Weight for consistency loss in discriminator')
-    loss_group.add_argument('--margin', type=float, default=0.3,
-                            help='Margin for generator margin loss')
+    loss_group.add_argument('--margin-max', type=float, default=0.3,
+                            help='Max margin for generator loss (warmup to this value)')
     loss_group.add_argument('--perturb-weight', type=float, default=0.005,
                             help='Weight for perturbation regularization')
     
@@ -372,8 +394,6 @@ if __name__ == "__main__":
                             help='Random seed for reproducibility')
     misc_group.add_argument('--gradient-clip-val', type=float, default=1.0,
                             help='Gradient clipping value')
-    misc_group.add_argument('--early-stopping-patience', type=int, default=10,
-                            help='Early stopping patience (epochs)')
     
     args = parser.parse_args()
     
@@ -404,7 +424,7 @@ if __name__ == "__main__":
     default_config.training.betas = (args.beta1, args.beta2)
     default_config.training.weight_decay = args.weight_decay
     default_config.training.consistency_weight = args.consistency_weight
-    default_config.training.margin = args.margin
+    default_config.training.margin_max = args.margin_max
     default_config.training.perturb_weight = args.perturb_weight
     default_config.training.gradient_clip_val = args.gradient_clip_val
     default_config.training.precision = args.precision

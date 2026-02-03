@@ -1,14 +1,12 @@
 # Deepfake Robustness Training (DDGAN)
 
-This project trains a deepfake detector with **adversarial robustness**, not a classical GAN objective.
-
-**Key idea:** the generator produces *bounded perturbations*; the discriminator remains a *strong classifier* and is trained to be consistent under those perturbations.
+This project trains a deepfake detector for **adversarial robustness**, not classical GAN realism. The generator produces **bounded perturbations** and the discriminator remains a **strong classifier** that is encouraged to be consistent under those perturbations.
 
 ## Summary
 
 - **Discriminator:** ConvNeXt backbone with a **dual-stream** RGB + DCT fusion (default).
-- **Generator:** U-Net that produces bounded perturbations (epsilon-bounded).
-- **Objective:** Robust classification via consistency loss + margin loss (not BCE on adversarial labels).
+- **Generator:** U-Net that outputs bounded perturbations (epsilon-bounded).
+- **Objective:** Robust classification via **consistency loss** and a **margin-based generator loss** (no BCE on adversarial labels).
 
 ## Label Convention (Important)
 
@@ -17,55 +15,72 @@ This codebase normalizes labels to:
 - **real = 1 (positive class)**
 - **fake = 0 (negative class)**
 
-This is applied uniformly in both local and HuggingFace datasets to keep training, validation, and metrics consistent.
+This applies to both local folders and HuggingFace datasets and is used consistently across training and validation.
 
 ## Losses (Implemented)
 
-Let $D(x)$ be discriminator logits and $G(x)$ be the adversarial perturbation.
+Let $D(x)$ be discriminator logits and $G(x)$ be the perturbation, $x_{adv} = x + G(x)$.
 
 **Discriminator loss:**
 
 $$
-L_D = L_{real} + L_{fake} + \lambda_{cons} \cdot \mathbb{E}\left[(\sigma(D(x)) - \sigma(D(x_{adv})))^2\right]
+L_D = L_{real} + L_{fake} + w_{cons}(t) \cdot \lambda_{cons} \cdot \mathbb{E}\left[(\sigma(D(x)) - \sigma(D(x_{adv})))^2\right]
 $$
 
-**Generator loss:**
+$w_{cons}(t)$ ramps from $0$ to $1$ over the first few epochs to avoid early collapse.
+
+**Generator loss (margin + perturbation):**
 
 $$
-L_G = \mathbb{E}[\max(0, D(x_{adv}) - m)] + \lambda_{pert} \cdot \mathbb{E}[||\delta||_2^2]
+L_G = \mathbb{E}\left[\frac{\max(0, D(x_{adv}) - m)}{\overline{|D(x_{adv})|}+\epsilon}\right] + \lambda_{pert} \cdot \mathbb{E}[||\delta||_2^2]
 $$
 
-Where $x_{adv} = x + \delta$ and $\delta = G(x)$ is epsilon-bounded.
+Where $m$ is the margin and $\delta = G(x)$ is epsilon-bounded.
 
 ## Metrics (Logged)
 
-Validation computes **both** clean and adversarial metrics:
+Validation reports **both** clean and adversarial AUC:
 
 - `val/auc_clean`
 - `val/auc_adv`
 - `val/robustness_gap = auc_clean - auc_adv`
 
-Model selection is based on **adversarial AUC** by default.
+Checkpoint selection and early stopping monitor **adversarial AUC** by default.
 
 ## Architecture
 
 ### Discriminator
 
-- Dual-stream ConvNeXt (default): RGB stream + DCT stream with learnable frequency filters.
+- Dual-stream ConvNeXt: RGB stream + DCT stream with learnable frequency filters.
 - Legacy single-stream DCT-only discriminator is supported.
 
 ### Generator
 
 - U-Net with a frequency-aware bottleneck (explicit DCT/IDCT).
-- Outputs bounded perturbations (epsilon constraint).
+- Outputs epsilon-bounded perturbations.
 
 ## Configuration
 
-Edit [config.py](config.py) to adjust:
+You can configure training in two ways:
+
+1. **Edit defaults** in [config.py](config.py)
+2. **Override via CLI** in [train.py](train.py)
+
+Key settings include:
 
 - Model type (`d_type`, `d_fusion_type`)
 - Loss weights (`consistency_weight`, `margin`, `perturb_weight`)
 - Optimization (`learning_rate`, `d_lr_mult`, `g_lr_mult`)
+- Hardware (`devices`, `precision`, `strategy`)
+
+## Dataset
+
+Supported sources:
+
+- **Local folders**: `celebdfv2_images/{train,test}/{real,fake}`
+- **HuggingFace**: set `--hf-dataset` (overrides local path)
+
+See [preprocess_celebdfv2.ipynb](preprocess_celebdfv2.ipynb) for preprocessing details.
 
 ## Training
 
@@ -73,226 +88,42 @@ Edit [config.py](config.py) to adjust:
 python train.py
 ```
 
-## Notes
+Common overrides:
 
-- This is **not** GAN-style realism training.
-- The generator does **not** synthesize fake images.
-- Robustness must be evaluated via **adversarial AUC** and **robustness gap**.
+```bash
+python train.py \
+    --hf-dataset RohanRamesh/celebdfv2_224 \
+    --batch-size 32 \
+    --epochs 50 \
+    --lr 1e-4 \
+    --devices 2 \
+    --precision 16-mixed
+```
+
+## Monitoring
+
+```bash
+tensorboard --logdir logs
+```
 
 ## Project Structure
 
 ```
 DDGAN/
 ├── config.py                   # Configuration management
-├── train.py                    # Main training script
+├── train.py                    # Main training script (CLI overrides)
 ├── lightning_module.py         # PyTorch Lightning module
 ├── models/
-│   ├── discriminator.py        # Discriminator model(s)
-│   └── generator.py            # Generator model
+│   ├── dct_extractor.py         # DCT feature extractor
+│   ├── discriminator.py         # Discriminator model(s)
+│   └── generator.py             # Generator model
 ├── data/
-│   └── datamodule.py           # DataModule + label normalization
-└── logs/                        # Training logs
-```# Deepfake Detection GAN
-
-A robust deepfake detector using GAN-based adversarial training with DCT features and ConvNeXt backbone.
-
-## 🎯 Project Overview
-
-This project implements a novel approach to deepfake detection by combining:
-- **DCT (Discrete Cosine Transform)** features for frequency-domain analysis
-- **ConvNeXt** backbone with pretrained ImageNet weights
-- **U-Net Generator** for adversarial perturbations
-- **Adversarial robustness training** for better generalization
-
-## 🏗️ Architecture
-
-### Discriminator
-- **Input**: RGB images (224×224)
-- **Feature Extraction**: DCT transformation to grayscale frequency features
-- **Backbone**: ConvNeXt-Tiny (27.8M parameters, pretrained on ImageNet)
-- **Output**: Binary classification (real/fake)
-
-### Generator
-- **Architecture**: U-Net with Frequency-Aware Bottleneck
-- **Purpose**: Generate adversarial perturbations to make discriminator more robust
-- **Output**: Perturbed images with bounded epsilon (default: 0.03)
-
-## 📊 Dataset
-
-**CelebDF-v2** preprocessed into image format:
-```
-celebdfv2_images/
-├── train/
-│   ├── real/
-│   └── fake/
-└── test/
-    ├── real/
-    └── fake/
+│   └── datamodule.py            # DataModule + label normalization
+└── logs/                        # TensorBoard logs
 ```
 
-See [preprocess_celebdfv2.ipynb](preprocess_celebdfv2.ipynb) for preprocessing details.
+## Notes
 
-## 🚀 Quick Start
-
-### 1. Installation
-
-```bash
-# Clone repository
-git clone <repository-url>
-cd DDGAN
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### 2. Preprocess Dataset (if needed)
-
-```bash
-# Run preprocessing notebook
-jupyter notebook preprocess_celebdfv2.ipynb
-```
-
-### 3. Train Model
-
-```bash
-# Basic training (with default settings)
-python train.py
-
-# Custom training
-python train.py \
-    --data-dir celebdfv2_images \
-    --batch-size 32 \
-    --epochs 50 \
-    --lr 2e-4 \
-    --devices 2
-```
-
-### 4. Monitor Training
-
-```bash
-# Launch TensorBoard
-tensorboard --logdir logs
-```
-
-## 📁 Project Structure
-
-```
-DDGAN/
-├── config.py                   # Configuration management
-├── train.py                    # Main training script
-├── lightning_module.py         # PyTorch Lightning module
-├── requirements.txt            # Python dependencies
-├── preprocess_celebdfv2.ipynb  # Dataset preprocessing
-├── models/
-│   ├── __init__.py
-│   ├── dct_extractor.py       # DCT feature extractor
-│   ├── discriminator.py       # Discriminator model
-│   └── generator.py           # Generator model
-├── data/
-│   ├── __init__.py
-│   └── datamodule.py          # PyTorch Lightning DataModule
-├── checkpoints/               # Model checkpoints (created during training)
-└── logs/                      # TensorBoard logs (created during training)
-```
-
-## 🔧 Configuration
-
-Edit [config.py](config.py) to customize:
-- Data parameters (batch size, augmentations)
-- Model architecture (backbone, channels)
-- Training hyperparameters (learning rate, epochs)
-- Hardware settings (GPUs, precision)
-
-## 📈 Training Details
-
-### Adversarial Robustness Training
-
-Unlike traditional GAN training, this approach:
-1. **Discriminator**: Learns to classify real/fake while being robust to perturbations
-2. **Generator**: Creates adversarial perturbations to test discriminator
-3. **Goal**: Discriminator that generalizes well to unseen deepfakes
-
-### Loss Functions
-
-**Discriminator Loss**:
-```
-L_D = L_real + L_fake + 0.5 × L_adv
-```
-
-**Generator Loss**:
-```
-L_G = L_adv + 0.1 × L_perturb
-```
-
-### Optimization
-
-- **Optimizer**: AdamW (lr=2e-4, betas=(0.5, 0.999))
-- **Scheduler**: CosineAnnealingLR
-- **Precision**: Mixed (16-bit)
-- **Gradient Clipping**: max_norm=1.0
-
-## 📊 Expected Results
-
-**Target Performance**:
-- Accuracy: > 80%
-- Precision: > 75%
-- Recall: > 75%
-- F1 Score: > 75%
-- ROC-AUC: > 85%
-
-**Training Time**:
-- ~10-15 min/epoch on 2× T4 GPUs
-- Total: ~8-12 hours for 50 epochs
-
-## 🧪 Testing Components
-
-Test individual components:
-
-```bash
-# Test DCT extractor
-python -m models.dct_extractor
-
-# Test Discriminator
-python -m models.discriminator
-
-# Test Generator
-python -m models.generator
-
-# Test DataModule
-python -m data.datamodule
-
-# Test Lightning module
-python lightning_module.py
-```
-
-## 📝 Key Features
-
-1. **DCT Features**: Frequency-domain analysis captures deepfake artifacts
-2. **Transfer Learning**: Pretrained ConvNeXt weights accelerate training
-3. **Adversarial Training**: Generator improves discriminator robustness
-4. **Mixed Precision**: 2-3× speedup with AMP
-5. **PyTorch Lightning**: Professional training pipeline with DDP support
-
-## 🔬 Research Background
-
-This implementation is based on insights from:
-- Frequency-domain deepfake detection research
-- Adversarial robustness training techniques
-- Modern CNN architectures (ConvNeXt)
-- U-Net for image-to-image translation
-
-## 📄 License
-
-[Add your license here]
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📧 Contact
-
-[Add your contact information here]
-
----
-
-**Note**: This project is for research and educational purposes. Use responsibly and ethically.
+- This is **not** GAN-style realism training.
+- The generator does **not** synthesize fake images.
+- Robustness should be judged using **adversarial AUC** and **robustness gap**.

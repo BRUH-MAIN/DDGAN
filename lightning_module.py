@@ -48,7 +48,7 @@ class DeepfakeGAN(pl.LightningModule):
         betas=(0.5, 0.999),
         weight_decay=0.01,
         consistency_weight=1.0,  # Weight for consistency loss in discriminator
-        margin=1.0,  # Margin for generator margin loss
+        margin_max=0.3,  # Max margin for generator loss (warmup to this value)
         perturb_weight=0.1,
         scheduler_type='cosine',
         max_epochs=50
@@ -69,7 +69,7 @@ class DeepfakeGAN(pl.LightningModule):
             betas: Adam beta parameters
             weight_decay: Weight decay for AdamW
             consistency_weight: Weight for consistency loss (prediction drift penalty)
-            margin: Margin for generator margin loss
+            margin_max: Max margin for generator loss (warmup to this value)
             perturb_weight: Weight for perturbation regularization
             scheduler_type: Learning rate scheduler type
             max_epochs: Maximum training epochs
@@ -116,30 +116,27 @@ class DeepfakeGAN(pl.LightningModule):
         p_adv = torch.sigmoid(logits_adv)
         return torch.mean((p_clean - p_adv) ** 2)
 
-    def generator_margin_loss(self, logits):
+    def generator_margin_loss(self, logits, margin):
         """
         Margin-based generator loss for adversarial robustness.
-        
+
         Only pushes logits DOWN until they cross below the margin threshold.
         Once logit ≤ margin, generator has succeeded → no more pressure.
-        
-        This prevents:
-        - Unbounded logit collapse
-        - Discriminator defensive shutdown
-        - Score distribution flattening
-        
+
         Args:
             logits: Discriminator logits for adversarial real images [B, 1]
-            
+            margin: Current margin threshold (warmup)
+
         Returns:
             Scalar loss (mean of margin violations)
         """
-        margin = self.hparams.margin  # Tune in range [0.2, 0.5]
-        # Only penalize if logit > margin (discriminator still confident it's real)
-        # Once logit ≤ margin, stop pushing → bounded pressure
         violation = F.relu(logits - margin)
-        scale = logits.abs().mean().detach() + 1e-6
-        return torch.mean(violation / scale)
+        return torch.mean(violation)
+
+    def current_margin(self):
+        """Warmup margin schedule: m(t) = m_max * min(1, t / 5)."""
+        t = float(self.current_epoch + 1)
+        return self.hparams.margin_max * min(1.0, t / 5.0)
     
     def perturbation_loss(self, perturbation):
         """
@@ -192,6 +189,9 @@ class DeepfakeGAN(pl.LightningModule):
         d_acc_real = torch.tensor(0.5, device=self.device)
         d_acc_fake = torch.tensor(0.5, device=self.device)
         adv_logit_mean = torch.tensor(0.0, device=self.device)  # Track mean adversarial logit
+        margin_violation_rate = torch.tensor(0.0, device=self.device)
+        margin_violation_mean = torch.tensor(0.0, device=self.device)
+        perturb_energy = torch.tensor(0.0, device=self.device)
         
         # ===== TRAIN DISCRIMINATOR =====
         # 1. Forward real images
@@ -246,14 +246,17 @@ class DeepfakeGAN(pl.LightningModule):
             # Forward through discriminator (no detach!)
             adv_logits_g = self.discriminator(adv_images_g)
             
+            # Margin warmup schedule
+            margin_t = self.current_margin()
+            margin_tensor = torch.tensor(margin_t, device=self.device, dtype=adv_logits_g.dtype)
+            
             # Margin-based loss: only push logits below margin, then stop
-            # This prevents unbounded logit collapse and preserves ranking
-            g_loss_confidence = self.generator_margin_loss(adv_logits_g)
-            g_loss_confidence = torch.clamp(g_loss_confidence, max=1.0)
+            g_loss_confidence = self.generator_margin_loss(adv_logits_g, margin_tensor)
             g_loss_margin = g_loss_confidence
             
             # Perturbation regularization (L2 norm - smoother gradients than L1)
             g_loss_perturb = self.perturbation_loss(perturbation_g)
+            perturb_energy = torch.mean(perturbation_g ** 2)
             
             # Combined generator loss
             g_loss = g_loss_margin + self.hparams.perturb_weight * g_loss_perturb
@@ -261,6 +264,8 @@ class DeepfakeGAN(pl.LightningModule):
             # Track mean adversarial logit for monitoring
             with torch.no_grad():
                 adv_logit_mean = adv_logits_g.mean()
+                margin_violation_rate = (adv_logits_g > margin_tensor).float().mean()
+                margin_violation_mean = torch.clamp(adv_logits_g - margin_tensor, min=0).mean()
         
         # Step 2: Update Generator (only if we have real images to generate adversarial samples)
         # Must include backward AND step together for AMP scaler compatibility
@@ -272,15 +277,15 @@ class DeepfakeGAN(pl.LightningModule):
         
         # Log metrics
         self.log('train/d_loss', d_loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log('train/g_loss', g_loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log('train/d_acc_real', d_acc_real, on_step=False, on_epoch=True)
         self.log('train/d_acc_fake', d_acc_fake, on_step=False, on_epoch=True)
         self.log('train/adv_logit_mean', adv_logit_mean, on_step=False, on_epoch=True)  # Should plateau, not collapse
         self.log('train/loss_real', loss_real, on_step=False, on_epoch=True)
         self.log('train/loss_fake', loss_fake, on_step=False, on_epoch=True)
         self.log('train/loss_consistency', loss_consistency, on_step=True, on_epoch=True)
-        self.log('train/g_loss_margin', g_loss_margin, on_step=True, on_epoch=True)  # Should plateau when logits ≤ margin
-        self.log('train/g_loss_perturb', g_loss_perturb, on_step=False, on_epoch=True)
+        self.log('train/margin_violation_rate', margin_violation_rate, on_step=False, on_epoch=True)
+        self.log('train/margin_violation_mean', margin_violation_mean, on_step=False, on_epoch=True)
+        self.log('train/perturb_energy', perturb_energy, on_step=False, on_epoch=True)
         
         # NaN check
         if torch.isnan(d_loss) or torch.isnan(g_loss):
