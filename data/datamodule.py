@@ -95,7 +95,7 @@ class HuggingFaceDeepfakeDataset(Dataset):
     Loads images from HuggingFace dataset
     """
     
-    def __init__(self, hf_dataset, transform=None, print_stats=True):
+    def __init__(self, hf_dataset, transform=None, print_stats=True, label_map=None):
         """
         Initialize dataset from HuggingFace
         
@@ -106,6 +106,7 @@ class HuggingFaceDeepfakeDataset(Dataset):
         """
         self.hf_dataset = hf_dataset
         self.transform = transform
+        self.label_map = label_map or self._infer_label_map()
         
         if print_stats:
             print(f"Loaded {len(self.hf_dataset)} images from HuggingFace")
@@ -122,15 +123,44 @@ class HuggingFaceDeepfakeDataset(Dataset):
             image = Image.fromarray(image)
         image = image.convert('RGB')
         
-        # HuggingFace label convention is typically 0=real, 1=fake
-        # Remap to real=1 (positive), fake=0 (negative)
-        label = 1 - int(item['label'])
+        label = item['label']
+        if isinstance(label, str):
+            if label not in self.label_map:
+                raise ValueError(f"Unknown label string '{label}'")
+            label = self.label_map[label]
+        else:
+            label = int(label)
+            if label not in self.label_map:
+                raise ValueError(f"Unknown label id '{label}'")
+            label = self.label_map[label]
         
         # Apply transformations
         if self.transform:
             image = self.transform(image)
         
         return image, label
+
+    def _infer_label_map(self):
+        label_feature = self.hf_dataset.features.get("label") if hasattr(self.hf_dataset, "features") else None
+        if label_feature is not None and hasattr(label_feature, "names"):
+            names = [n.lower() for n in label_feature.names]
+            if "real" in names and "fake" in names:
+                real_idx = names.index("real")
+                fake_idx = names.index("fake")
+                return {
+                    real_idx: 1,
+                    fake_idx: 0,
+                    "real": 1,
+                    "fake": 0,
+                }
+
+        print("Warning: Could not infer label names; defaulting to 0=real, 1=fake.")
+        return {
+            0: 1,
+            1: 0,
+            "real": 1,
+            "fake": 0,
+        }
 
 
 class DeepfakeDataModule(pl.LightningDataModule):
@@ -144,6 +174,7 @@ class DeepfakeDataModule(pl.LightningDataModule):
         self,
         data_dir=None,
         hf_dataset_id=None,
+        hf_label_map=None,
         batch_size=32,
         num_workers=4,
         pin_memory=True,
@@ -181,6 +212,7 @@ class DeepfakeDataModule(pl.LightningDataModule):
         self.persistent_workers = persistent_workers
         self.mean = mean
         self.std = std
+        self.hf_label_map = hf_label_map
         
         # Define transforms
         self.train_transform = transforms.Compose([
@@ -237,13 +269,15 @@ class DeepfakeDataModule(pl.LightningDataModule):
                 self.train_dataset = HuggingFaceDeepfakeDataset(
                     train_data,
                     transform=self.train_transform,
-                    print_stats=False
+                    print_stats=False,
+                    label_map=self.hf_label_map,
                 )
                 
                 self.val_dataset = HuggingFaceDeepfakeDataset(
                     val_data,
                     transform=self.val_transform,
-                    print_stats=False
+                    print_stats=False,
+                    label_map=self.hf_label_map,
                 )
             else:
                 # Load from local directory
