@@ -78,10 +78,34 @@ def main() -> None:
         base_channels=args.base_channels,
     )
 
+    class MetricsPrinter(pl.Callback):
+        def on_validation_epoch_end(self, trainer, pl_module):
+            if not trainer.is_global_zero:
+                return
+            metrics = trainer.callback_metrics
+            keys = [
+                "train_loss",
+                "train_acc",
+                "val_loss",
+                "val_acc",
+            ]
+            parts = []
+            for key in keys:
+                if key in metrics:
+                    value = metrics[key]
+                    try:
+                        value = value.item()
+                    except Exception:
+                        pass
+                    parts.append(f"{key}={value:.4f}")
+            if parts:
+                print("Epoch metrics: " + ", ".join(parts))
+
     callbacks = [
         ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1, filename="freqnet-{epoch}-{val_loss:.4f}"),
         LearningRateMonitor(logging_interval="epoch"),
         TQDMProgressBar(refresh_rate=args.pbar_refresh_rate),
+        MetricsPrinter(),
     ]
 
     trainer = pl.Trainer(

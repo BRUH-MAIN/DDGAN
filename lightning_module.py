@@ -78,8 +78,22 @@ class DeepfakeLitModule(pl.LightningModule):
         preds = (torch.sigmoid(logits) > 0.5).float()
         acc = (preds == labels).float().mean()
 
-        self.log(f"{stage}_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log(f"{stage}_acc", acc, on_step=True, on_epoch=True, prog_bar=True)
+        self.log(
+            f"{stage}_loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+        self.log(
+            f"{stage}_acc",
+            acc,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
         return loss
 
     def training_step(self, batch, batch_idx):
