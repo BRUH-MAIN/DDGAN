@@ -6,8 +6,7 @@ from __future__ import annotations
 import argparse
 
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-from tqdm import tqdm
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, TQDMProgressBar
 
 from data.datamodule import DeepfakeDataModule
 from lightning_module import DeepfakeLitModule
@@ -33,9 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dct-fcl-activation", type=str, default="gelu")
     parser.add_argument("--accelerator", type=str, default="auto")
     parser.add_argument("--devices", type=str, default="auto")
-    parser.add_argument("--pbar-min-interval", type=float, default=1.0)
-    parser.add_argument("--pbar-max-interval", type=float, default=5.0)
-    parser.add_argument("--pbar-min-iters", type=int, default=1)
+    parser.add_argument("--pbar-refresh-rate", type=int, default=1)
     parser.add_argument(
         "--hf-label-order",
         type=str,
@@ -77,31 +74,10 @@ def main() -> None:
         base_channels=args.base_channels,
     )
 
-    class EpochProgressBar(pl.Callback):
-        def on_train_epoch_start(self, trainer, pl_module):
-            if not trainer.is_global_zero:
-                return
-            self._pbar = tqdm(
-                total=1,
-                desc=f"Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}",
-                mininterval=args.pbar_min_interval,
-                maxinterval=args.pbar_max_interval,
-                miniters=args.pbar_min_iters,
-                dynamic_ncols=True,
-            )
-
-        def on_train_epoch_end(self, trainer, pl_module):
-            if not trainer.is_global_zero:
-                return
-            if getattr(self, "_pbar", None) is not None:
-                self._pbar.update(1)
-                self._pbar.close()
-                self._pbar = None
-
     callbacks = [
         ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1, filename="freqnet-{epoch}-{val_loss:.4f}"),
         LearningRateMonitor(logging_interval="epoch"),
-        EpochProgressBar(),
+        TQDMProgressBar(refresh_rate=args.pbar_refresh_rate),
     ]
 
     trainer = pl.Trainer(
@@ -110,7 +86,7 @@ def main() -> None:
         devices=args.devices,
         callbacks=callbacks,
         log_every_n_steps=50,
-        enable_progress_bar=False,
+        enable_progress_bar=True,
     )
 
     trainer.fit(model, datamodule=datamodule)
