@@ -7,6 +7,7 @@ import argparse
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from tqdm import tqdm
 
 from data.datamodule import DeepfakeDataModule
 from lightning_module import DeepfakeLitModule
@@ -73,9 +74,24 @@ def main() -> None:
         base_channels=args.base_channels,
     )
 
+    class EpochProgressBar(pl.Callback):
+        def on_train_epoch_start(self, trainer, pl_module):
+            if not trainer.is_global_zero:
+                return
+            self._pbar = tqdm(total=1, desc=f"Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}")
+
+        def on_train_epoch_end(self, trainer, pl_module):
+            if not trainer.is_global_zero:
+                return
+            if getattr(self, "_pbar", None) is not None:
+                self._pbar.update(1)
+                self._pbar.close()
+                self._pbar = None
+
     callbacks = [
         ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1, filename="freqnet-{epoch}-{val_loss:.4f}"),
         LearningRateMonitor(logging_interval="epoch"),
+        EpochProgressBar(),
     ]
 
     trainer = pl.Trainer(
@@ -84,6 +100,7 @@ def main() -> None:
         devices=args.devices,
         callbacks=callbacks,
         log_every_n_steps=50,
+        enable_progress_bar=False,
     )
 
     trainer.fit(model, datamodule=datamodule)
