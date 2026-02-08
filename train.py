@@ -33,6 +33,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dct-fcl-activation", type=str, default="gelu")
     parser.add_argument("--accelerator", type=str, default="auto")
     parser.add_argument("--devices", type=str, default="auto")
+    parser.add_argument("--pbar-min-interval", type=float, default=1.0)
+    parser.add_argument("--pbar-max-interval", type=float, default=5.0)
+    parser.add_argument("--pbar-min-iters", type=int, default=1)
     parser.add_argument(
         "--hf-label-order",
         type=str,
@@ -78,7 +81,14 @@ def main() -> None:
         def on_train_epoch_start(self, trainer, pl_module):
             if not trainer.is_global_zero:
                 return
-            self._pbar = tqdm(total=1, desc=f"Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}")
+            self._pbar = tqdm(
+                total=1,
+                desc=f"Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}",
+                mininterval=args.pbar_min_interval,
+                maxinterval=args.pbar_max_interval,
+                miniters=args.pbar_min_iters,
+                dynamic_ncols=True,
+            )
 
         def on_train_epoch_end(self, trainer, pl_module):
             if not trainer.is_global_zero:
