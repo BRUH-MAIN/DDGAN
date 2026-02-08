@@ -17,6 +17,7 @@ class DeepfakeLitModule(pl.LightningModule):
         lr: float = 1e-4,
         weight_decay: float = 1e-4,
         pos_weight: float | None = None,
+        compile_model: bool = False,
         enable_channel_hfrf_dct: bool = True,
         hfri_low_freq_ratio: float = 0.125,
         hfrf_low_freq_ratio: float = 0.125,
@@ -39,8 +40,16 @@ class DeepfakeLitModule(pl.LightningModule):
         )
         initial_pos_weight = 1.0 if pos_weight is None else float(pos_weight)
         self.register_buffer("pos_weight", torch.tensor(initial_pos_weight, dtype=torch.float32))
+        self._compiled = False
 
     def on_fit_start(self) -> None:
+        if self.hparams.compile_model and not self._compiled:
+            try:
+                self.model = torch.compile(self.model)
+                self._compiled = True
+            except Exception as exc:
+                print(f"Warning: torch.compile failed: {exc}")
+
         if self.hparams.pos_weight is not None:
             return
 
