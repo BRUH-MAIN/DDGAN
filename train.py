@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--pos-weight", type=float, default=None)
     parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument("--disable-channel-hfrf-dct", action="store_true")
     parser.add_argument("--hfri-low-freq-ratio", type=float, default=0.125)
@@ -65,6 +66,7 @@ def main() -> None:
     model = DeepfakeLitModule(
         lr=args.lr,
         weight_decay=args.weight_decay,
+        pos_weight=args.pos_weight,
         enable_channel_hfrf_dct=not args.disable_channel_hfrf_dct,
         hfri_low_freq_ratio=args.hfri_low_freq_ratio,
         hfrf_low_freq_ratio=args.hfrf_low_freq_ratio,
