@@ -110,7 +110,6 @@ def main() -> None:
                 disable=self.is_disabled,
                 leave=False,
                 dynamic_ncols=True,
-                file=self.file,
             )
 
     callbacks = [
