@@ -7,6 +7,7 @@ import argparse
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, TQDMProgressBar
+from tqdm.auto import tqdm
 
 from data.datamodule import DeepfakeDataModule
 from lightning_module import DeepfakeLitModule
@@ -101,10 +102,21 @@ def main() -> None:
             if parts:
                 print("Epoch metrics: " + ", ".join(parts))
 
+    class SingleValidationBar(TQDMProgressBar):
+        def init_validation_tqdm(self) -> tqdm:
+            return tqdm(
+                desc=self.validation_description,
+                position=2 * self.process_position,
+                disable=self.is_disabled,
+                leave=False,
+                dynamic_ncols=True,
+                file=self.file,
+            )
+
     callbacks = [
         ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1, filename="freqnet-{epoch}-{val_loss:.4f}"),
         LearningRateMonitor(logging_interval="epoch"),
-        TQDMProgressBar(refresh_rate=args.pbar_refresh_rate),
+        SingleValidationBar(refresh_rate=args.pbar_refresh_rate),
         MetricsPrinter(),
     ]
 
