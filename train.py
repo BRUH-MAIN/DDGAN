@@ -7,6 +7,7 @@ import argparse
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, TQDMProgressBar
+from pytorch_lightning.loggers import TensorBoardLogger
 from tqdm.auto import tqdm
 
 from data.datamodule import DeepfakeDataModule
@@ -22,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-epochs", type=int, default=30)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--pos-weight", type=float, default=None)
     parser.add_argument("--compile-model", action="store_true")
@@ -113,17 +114,26 @@ def main() -> None:
             )
 
     callbacks = [
-        ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1, filename="freqnet-{epoch}-{val_loss:.4f}"),
+        ModelCheckpoint(
+            monitor="val_loss",
+            mode="min",
+            save_top_k=3,
+            save_last=True,
+            filename="freqnet-{epoch}-{val_loss:.4f}",
+        ),
         LearningRateMonitor(logging_interval="epoch"),
         SingleValidationBar(refresh_rate=args.pbar_refresh_rate),
         MetricsPrinter(),
     ]
+
+    logger = TensorBoardLogger(save_dir="lightning_logs", name="freqnet")
 
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
         accelerator=args.accelerator,
         devices=args.devices,
         callbacks=callbacks,
+        logger=logger,
         log_every_n_steps=50,
         enable_progress_bar=True,
     )

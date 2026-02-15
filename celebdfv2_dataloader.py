@@ -31,7 +31,7 @@ class CelebDFImageDataset(Dataset):
         if self.transform:
             image = self.transform(image)
 
-        return image, label
+        return image, label, img_path
 
 # Example usage:
 if __name__ == "__main__":

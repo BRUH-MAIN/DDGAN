@@ -85,7 +85,7 @@ class DeepfakeDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
-        return image, label
+        return image, label, img_path
 
 
 class HuggingFaceDeepfakeDataset(Dataset):
@@ -138,7 +138,15 @@ class HuggingFaceDeepfakeDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
-        return image, label
+        return image, label, self._extract_item_path(item, idx)
+
+    @staticmethod
+    def _extract_item_path(item, idx: int) -> str:
+        for key in ("path", "file", "filepath", "image_path", "filename"):
+            value = item.get(key)
+            if value:
+                return str(value)
+        return f"hf://{idx}"
 
     def _infer_label_map(self):
         label_feature = self.hf_dataset.features.get("label") if hasattr(self.hf_dataset, "features") else None
@@ -339,7 +347,7 @@ if __name__ == "__main__":
     
     # Test a batch
     batch = next(iter(train_loader))
-    images, labels = batch
+    images, labels, _paths = batch
     print(f"\nBatch shapes:")
     print(f"  Images: {images.shape}")
     print(f"  Labels: {labels.shape}")
